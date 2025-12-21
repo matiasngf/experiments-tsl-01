@@ -68,9 +68,9 @@ function DottedGrid() {
   // TSL uniforms using useUniforms hook
   const uniforms = useUniforms({
     time: 0,
-    reveal: 0,
-    dotSize: 0.8,
-    gridScale: 20,
+    reveal: 1,
+    dotSize: 0.38,
+    gridScale: 50,
     debugBackground: 0,
     aspect: aspect,
   });
@@ -85,7 +85,7 @@ function DottedGrid() {
       },
     },
     dotSize: {
-      value: 0.8,
+      value: 0.38,
       min: 0,
       max: 1,
       step: 0.01,
@@ -95,7 +95,7 @@ function DottedGrid() {
       },
     },
     gridScale: {
-      value: 20,
+      value: 50,
       min: 2,
       max: 50,
       step: 1,
@@ -110,6 +110,7 @@ function DottedGrid() {
   const scope = useAnime({
     methods: {
       reveal: () => {
+        return 
         animate(uniforms.reveal, {
           value: 1,
           duration: 2000,
@@ -121,21 +122,8 @@ function DottedGrid() {
           ease: cubicBezier(0.25, 0.1, 0.25, 1),
         });
       },
-      pulse: () => {
-        animate(uniforms.dotSize, {
-          value: [0.8, 1, 0.8],
-          duration: 1000,
-          ease: "easeInOutQuad",
-        });
-      },
     },
   });
-
-  // Trigger reveal on mount
-  useEffect(() => {
-    uniforms.gridScale.value = 5;
-    scope.methods.reveal();
-  }, [scope, uniforms]);
 
   // Update time and aspect uniforms each frame
   useFrame((state) => {
@@ -164,8 +152,7 @@ function DottedGrid() {
       const cellColor = backgroundFn(cellCenterUV);
 
       // Dot SDF with animated size
-      const pulse = float(1).add(uniforms.time.mul(2).sin().mul(0.1));
-      const radius = uniforms.dotSize.mul(0.5).mul(pulse);
+      const radius = uniforms.dotSize.mul(0.5);
       const dist = localUV.length();
       const dot = smoothstep(radius, radius.sub(0.05), dist);
 
@@ -184,7 +171,7 @@ function DottedGrid() {
   );
 
   return (
-    <mesh material={material} onClick={() => scope.methods.pulse()}>
+    <mesh material={material}>
       <planeGeometry args={[viewport.width, viewport.height]} />
     </mesh>
   );
