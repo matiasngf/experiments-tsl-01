@@ -26,16 +26,16 @@ import * as THREE from "three/webgpu";
 function App() {
   return (
     <Canvas
-      gl={(canvas) => {
-        const renderer = new THREE.WebGPURenderer({
-          canvas,
-          antialias: true,
-        });
-        renderer.setPixelRatio(window.devicePixelRatio);
+      gl={async (props) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const renderer = new WebGPURenderer(props as any);
+        await renderer.init();
         return renderer;
       }}
     >
-      <Scene />
+      <Suspense fallback={null}>
+        <Scene />
+      </Suspense>
     </Canvas>
   );
 }
@@ -108,70 +108,109 @@ function Scene() {
 For dynamic effect parameters:
 
 ```tsx
-// hooks/use-bloom-postprocessing.ts
-import { useThree, useFrame } from "@react-three/fiber";
-import { useEffect, useRef, useMemo } from "react";
-import * as THREE from "three/webgpu";
-import { pass, uniform } from "three/tsl";
-import { bloom } from "three/addons/tsl/display/BloomNode.js";
+// hooks/use-bloom-pass.ts
+"use client";
 
-interface BloomConfig {
+import { useMemo } from "react";
+import { uniform } from "three/tsl";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
+import type { Node, PassNode } from "three/webgpu";
+
+interface BloomPassOptions {
+  /** Bloom strength/intensity (default: 1) */
   strength?: number;
-  threshold?: number;
+  /** Bloom radius - size of the bloom effect (default: 0.5) */
   radius?: number;
+  /** Bloom threshold - values below this won't bloom (default: 0.5) */
+  threshold?: number;
 }
 
-export function useBloomPostprocessing(config: BloomConfig = {}) {
-  const { strength = 1, threshold = 0.4, radius = 0.5 } = config;
-  const { gl, scene, camera } = useThree();
+interface BloomUniforms {
+  strength: ReturnType<typeof uniform<number>>;
+  radius: ReturnType<typeof uniform<number>>;
+  threshold: ReturnType<typeof uniform<number>>;
+}
 
-  const postProcessingRef = useRef<THREE.PostProcessing | null>(null);
+interface BloomPassResult {
+  /** The bloom node to add to the scene color */
+  bloomNode: Node;
+  /** Uniforms for direct access */
+  uniforms: BloomUniforms;
+}
 
-  // Create uniforms once
-  const uniforms = useMemo(
-    () => ({
+/**
+ * Hook that creates a bloom postprocessing pass with reactive parameters.
+ *
+ * @param scenePass - The scene pass from usePostProcessing
+ * @param options - Bloom configuration options
+ *
+ * @example
+ * ```tsx
+ * const { postProcessing, scenePass } = usePostProcessing();
+ * const { bloomNode } = useBloomPass(scenePass, {
+ *   strength: 1.5,
+ *   threshold: 0.3,
+ *   radius: 0.5,
+ * });
+ *
+ * useEffect(() => {
+ *   const sceneColor = scenePass.getTextureNode('output');
+ *   postProcessing.outputNode = renderOutput(sceneColor.add(bloomNode));
+ * }, [postProcessing, scenePass, bloomNode]);
+ * ```
+ */
+export function useBloomPass(
+  scenePass: PassNode,
+  options: BloomPassOptions = {}
+): BloomPassResult {
+  const { strength = 1, radius = 0.5, threshold = 0.5 } = options;
+
+  const [bloomNode, uniforms] = useMemo(() => {
+    const uniforms: BloomUniforms = {
       strength: uniform(strength),
-      threshold: uniform(threshold),
       radius: uniform(radius),
-    }),
-    []
-  );
+      threshold: uniform(threshold),
+    };
 
-  // Update uniforms when config changes (no shader recompilation)
-  useEffect(() => {
-    uniforms.strength.value = strength;
-    uniforms.threshold.value = threshold;
-    uniforms.radius.value = radius;
-  }, [strength, threshold, radius, uniforms]);
+    const sceneColor = scenePass.getTextureNode("output");
 
-  useEffect(() => {
-    const postProcessing = new THREE.PostProcessing(gl as THREE.WebGPURenderer);
-
-    const scenePass = pass(scene, camera);
-    const scenePassColor = scenePass.getTextureNode("output");
-
-    // Use uniforms for dynamic values
-    const bloomPass = bloom(
-      scenePassColor,
-      uniforms.strength,
-      uniforms.threshold,
-      uniforms.radius
+    const bloomNode = bloom(
+      sceneColor,
+      uniforms.strength as unknown as number,
+      uniforms.radius as unknown as number,
+      uniforms.threshold as unknown as number
     );
 
-    postProcessing.outputNode = scenePassColor.add(bloomPass);
-    postProcessingRef.current = postProcessing;
+    return [bloomNode, uniforms] as const;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenePass]);
 
-    return () => {
-      postProcessing.dispose();
-    };
-  }, [gl, scene, camera, uniforms]);
+  // Update uniforms directly - no useEffect needed
+  uniforms.strength.value = strength;
+  uniforms.radius.value = radius;
+  uniforms.threshold.value = threshold;
 
-  useFrame(() => {
-    postProcessingRef.current?.render();
-  }, 1);
-
-  return { postProcessing: postProcessingRef, uniforms };
+  return { bloomNode, uniforms };
 }
+```
+
+Usage:
+
+```tsx
+  const { postProcessing, scenePass } = usePostProcessing();
+
+  const { bloomNode } = useBloomPass(scenePass, {
+    strength: 0.7,
+    threshold: 0.5,
+    radius: 0.2,
+  });
+
+  // Chain postprocessing passes
+  useEffect(() => {
+    const sceneColor = scenePass.getTextureNode("output");
+    postProcessing.outputNode = renderOutput(sceneColor.add(bloomNode));
+  }, [postProcessing, scenePass, bloomNode]);
+
 ```
 
 ### Usage with Leva Controls
@@ -180,244 +219,19 @@ export function useBloomPostprocessing(config: BloomConfig = {}) {
 import { useControls } from "leva";
 
 function Scene() {
-  const { strength, threshold, radius } = useControls({
-    strength: { value: 1, min: 0, max: 3 },
-    threshold: { value: 0.4, min: 0, max: 1 },
-    radius: { value: 0.5, min: 0, max: 1 },
+  const { postEnabled } = useControls({
+    postEnabled: {
+      value: true,
+      label: "PostProcessing",
+    },
   });
-
-  useBloomPostprocessing({ strength, threshold, radius });
+  const { postProcessing, scenePass } = usePostProcessing({
+    enabled: postEnabled,
+  });
 
   return <SceneContent />;
 }
 ```
-
----
-
-## Multi-Effect Postprocessing
-
-For multiple effects with proper ordering:
-
-```tsx
-// hooks/use-multi-postprocessing.ts
-import { useThree, useFrame } from "@react-three/fiber";
-import { useEffect, useRef, useMemo } from "react";
-import * as THREE from "three/webgpu";
-import { pass, renderOutput, uniform } from "three/tsl";
-import { bloom } from "three/addons/tsl/display/BloomNode.js";
-import { fxaa } from "three/addons/tsl/display/FXAANode.js";
-
-interface PostprocessingConfig {
-  bloom?: {
-    enabled?: boolean;
-    strength?: number;
-    threshold?: number;
-    radius?: number;
-  };
-  fxaa?: {
-    enabled?: boolean;
-  };
-}
-
-export function useMultiPostprocessing(config: PostprocessingConfig = {}) {
-  const { gl, scene, camera } = useThree();
-  const postProcessingRef = useRef<THREE.PostProcessing | null>(null);
-
-  const uniforms = useMemo(
-    () => ({
-      bloomStrength: uniform(config.bloom?.strength ?? 1),
-      bloomThreshold: uniform(config.bloom?.threshold ?? 0.4),
-      bloomRadius: uniform(config.bloom?.radius ?? 0.5),
-    }),
-    []
-  );
-
-  // Update uniforms
-  useEffect(() => {
-    if (config.bloom) {
-      uniforms.bloomStrength.value = config.bloom.strength ?? 1;
-      uniforms.bloomThreshold.value = config.bloom.threshold ?? 0.4;
-      uniforms.bloomRadius.value = config.bloom.radius ?? 0.5;
-    }
-  }, [config.bloom, uniforms]);
-
-  useEffect(() => {
-    const postProcessing = new THREE.PostProcessing(gl as THREE.WebGPURenderer);
-
-    // Disable auto color transform for FXAA
-    if (config.fxaa?.enabled) {
-      postProcessing.outputColorTransform = false;
-    }
-
-    const scenePass = pass(scene, camera);
-    let outputNode = scenePass.getTextureNode("output");
-
-    // 1. Bloom (linear space)
-    if (config.bloom?.enabled !== false) {
-      const bloomPass = bloom(
-        outputNode,
-        uniforms.bloomStrength,
-        uniforms.bloomThreshold,
-        uniforms.bloomRadius
-      );
-      outputNode = outputNode.add(bloomPass);
-    }
-
-    // 2. Tone mapping (if using FXAA)
-    if (config.fxaa?.enabled) {
-      outputNode = renderOutput(outputNode);
-    }
-
-    // 3. Anti-aliasing (sRGB space)
-    if (config.fxaa?.enabled) {
-      outputNode = fxaa(outputNode);
-    }
-
-    postProcessing.outputNode = outputNode;
-    postProcessingRef.current = postProcessing;
-
-    return () => {
-      postProcessing.dispose();
-    };
-  }, [
-    gl,
-    scene,
-    camera,
-    config.bloom?.enabled,
-    config.fxaa?.enabled,
-    uniforms,
-  ]);
-
-  useFrame(() => {
-    postProcessingRef.current?.render();
-  }, 1);
-
-  return { postProcessing: postProcessingRef, uniforms };
-}
-```
-
----
-
-## Component-Based Approach
-
-For declarative postprocessing:
-
-```tsx
-// components/Postprocessing.tsx
-import { useThree, useFrame } from "@react-three/fiber";
-import {
-  useEffect,
-  useRef,
-  useMemo,
-  createContext,
-  useContext,
-  ReactNode,
-} from "react";
-import * as THREE from "three/webgpu";
-import { pass, uniform } from "three/tsl";
-import { bloom } from "three/addons/tsl/display/BloomNode.js";
-
-const PostprocessingContext = createContext<{
-  uniforms: Record<string, THREE.Uniform>;
-} | null>(null);
-
-export function usePostprocessingContext() {
-  const ctx = useContext(PostprocessingContext);
-  if (!ctx)
-    throw new Error(
-      "usePostprocessingContext must be used within Postprocessing"
-    );
-  return ctx;
-}
-
-interface PostprocessingProps {
-  children: ReactNode;
-  bloomStrength?: number;
-  bloomThreshold?: number;
-  bloomRadius?: number;
-}
-
-export function Postprocessing({
-  children,
-  bloomStrength = 1,
-  bloomThreshold = 0.4,
-  bloomRadius = 0.5,
-}: PostprocessingProps) {
-  const { gl, scene, camera } = useThree();
-  const postProcessingRef = useRef<THREE.PostProcessing | null>(null);
-
-  const uniforms = useMemo(
-    () => ({
-      bloomStrength: uniform(bloomStrength),
-      bloomThreshold: uniform(bloomThreshold),
-      bloomRadius: uniform(bloomRadius),
-    }),
-    []
-  );
-
-  useEffect(() => {
-    uniforms.bloomStrength.value = bloomStrength;
-    uniforms.bloomThreshold.value = bloomThreshold;
-    uniforms.bloomRadius.value = bloomRadius;
-  }, [bloomStrength, bloomThreshold, bloomRadius, uniforms]);
-
-  useEffect(() => {
-    const postProcessing = new THREE.PostProcessing(gl as THREE.WebGPURenderer);
-
-    const scenePass = pass(scene, camera);
-    const scenePassColor = scenePass.getTextureNode("output");
-
-    const bloomPass = bloom(
-      scenePassColor,
-      uniforms.bloomStrength,
-      uniforms.bloomThreshold,
-      uniforms.bloomRadius
-    );
-
-    postProcessing.outputNode = scenePassColor.add(bloomPass);
-    postProcessingRef.current = postProcessing;
-
-    return () => {
-      postProcessing.dispose();
-    };
-  }, [gl, scene, camera, uniforms]);
-
-  useFrame(() => {
-    postProcessingRef.current?.render();
-  }, 1);
-
-  return (
-    <PostprocessingContext.Provider value={{ uniforms }}>
-      {children}
-    </PostprocessingContext.Provider>
-  );
-}
-```
-
-### Usage
-
-```tsx
-function App() {
-  const [bloomStrength, setBloomStrength] = useState(1);
-
-  return (
-    <Canvas gl={/* WebGPU config */}>
-      <Postprocessing bloomStrength={bloomStrength}>
-        <mesh>
-          <boxGeometry />
-          <meshStandardMaterial
-            color="hotpink"
-            emissive="hotpink"
-            emissiveIntensity={2}
-          />
-        </mesh>
-      </Postprocessing>
-    </Canvas>
-  );
-}
-```
-
----
 
 ## Performance Best Practices
 

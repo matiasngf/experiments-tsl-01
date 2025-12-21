@@ -1,66 +1,69 @@
+"use client";
+
 import { useThree, useFrame } from "@react-three/fiber";
-import { useEffect, useRef, useMemo } from "react";
-import * as THREE from "three/webgpu";
-import { pass, uniform } from "three/tsl";
-import { bloom } from "three/addons/tsl/display/BloomNode.js";
+import { useEffect, useMemo } from "react";
+import { PostProcessing, WebGPURenderer } from "three/webgpu";
+import { pass } from "three/tsl";
+import type { PassNode } from "three/webgpu";
 
-interface BloomConfig {
-  strength?: number;
-  threshold?: number;
-  radius?: number;
+interface UsePostProcessingOptions {
+  enabled?: boolean;
 }
 
-export function usePostprocessing(config: BloomConfig = {}) {
-  const { strength = 0.5, threshold = 0.2, radius = 0.4 } = config;
-  const { gl, scene, camera } = useThree();
+interface UsePostProcessingResult {
+  postProcessing: PostProcessing;
+  scenePass: PassNode;
+}
 
-  const postProcessingRef = useRef<THREE.PostProcessing | null>(null);
+/**
+ * Hook that creates and manages a PostProcessing instance with WebGPU.
+ * Automatically gets the renderer, scene, and camera from R3F context.
+ *
+ * @param options.enabled - Whether postprocessing is enabled. Defaults to true.
+ *   When disabled, renders the scene normally without postprocessing.
+ *
+ * @example
+ * ```tsx
+ * const { postProcessing, scenePass } = usePostProcessing({ enabled: true });
+ *
+ * // Chain with effects in a useEffect
+ * useEffect(() => {
+ *   const sceneColor = scenePass.getTextureNode('output');
+ *   postProcessing.outputNode = renderOutput(sceneColor.add(bloomPass));
+ * }, [postProcessing, scenePass, bloomPass]);
+ * ```
+ */
+export function usePostProcessing(
+  options: UsePostProcessingOptions = {}
+): UsePostProcessingResult {
+  const { enabled = true } = options;
 
-  // Create uniforms once
-  const uniforms = useMemo(
-    () => ({
-      strength: uniform(strength),
-      threshold: uniform(threshold),
-      radius: uniform(radius),
-    }),
-    []
-  );
+  const gl = useThree((state) => state.gl) as unknown as WebGPURenderer;
+  const scene = useThree((state) => state.scene);
+  const camera = useThree((state) => state.camera);
 
-  // Update uniforms when config changes (no shader recompilation)
-  useEffect(() => {
-    uniforms.strength.value = strength;
-    uniforms.threshold.value = threshold;
-    uniforms.radius.value = radius;
-  }, [strength, threshold, radius, uniforms]);
-
-  useEffect(() => {
-    const postProcessing = new THREE.PostProcessing(
-      gl as THREE.WebGPURenderer
-    );
-
+  const result = useMemo(() => {
+    const postProcessing = new PostProcessing(gl);
     const scenePass = pass(scene, camera);
-    const scenePassColor = scenePass.getTextureNode("output");
 
-    // Use uniforms for dynamic values
-    const bloomPass = bloom(
-      scenePassColor,
-      uniforms.strength,
-      uniforms.threshold,
-      uniforms.radius
-    );
+    return { postProcessing, scenePass };
+  }, [gl, scene, camera]);
 
-    postProcessing.outputNode = scenePassColor.add(bloomPass);
-    postProcessingRef.current = postProcessing;
-
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
-      postProcessing.dispose();
+      result.postProcessing.dispose();
     };
-  }, [gl, scene, camera, uniforms]);
+  }, [result.postProcessing]);
 
+  // Render using postProcessing or normal renderer based on enabled flag
   useFrame(() => {
-    postProcessingRef.current?.render();
-  }, 1); // Priority 1 to run after scene updates
+    if (enabled) {
+      result.postProcessing.render();
+    } else {
+      gl.render(scene, camera);
+    }
+  }, 1);
 
-  return { postProcessing: postProcessingRef, uniforms };
+  return result;
 }
-

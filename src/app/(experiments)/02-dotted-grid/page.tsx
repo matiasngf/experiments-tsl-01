@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/immutability */
 "use client";
 
 import { Canvas, useFrame } from "@react-three/fiber";
@@ -6,16 +7,18 @@ import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
 import {
   uv,
   float,
-  vec2,
   fract,
   smoothstep,
   uniform,
   color,
   mix,
+  renderOutput,
 } from "three/tsl";
-import { usePostprocessing } from "@/lib/gpu/use-postprocessing";
+import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
+import { useControls } from "leva";
+import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
 
 export default function DottedGridPage() {
   return (
@@ -36,12 +39,28 @@ export default function DottedGridPage() {
 }
 
 function Scene() {
-  // Enable bloom postprocessing
-  usePostprocessing({
-    strength: 0.5,
-    threshold: 0.2,
-    radius: 0.4,
+  const { postEnabled } = useControls({
+    postEnabled: {
+      value: true,
+      label: "PostProcessing",
+    },
   });
+  const { postProcessing, scenePass } = usePostProcessing({
+    enabled: postEnabled,
+  });
+
+  const { bloomNode } = useBloomPass(scenePass, {
+    strength: 0.7,
+    threshold: 0.5,
+    radius: 0.2,
+  });
+
+
+  // Chain postprocessing passes
+  useEffect(() => {
+    const sceneColor = scenePass.getTextureNode("output");
+    postProcessing.outputNode = renderOutput(sceneColor.add(bloomNode));
+  }, [postProcessing, scenePass, bloomNode]);
 
   return (
     <>
