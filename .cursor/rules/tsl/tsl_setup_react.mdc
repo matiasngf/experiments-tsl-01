@@ -1,0 +1,353 @@
+---
+description: How to setup TSL (Three.js Shading Language) with React Three Fiber and WebGPURenderer, including page structure, material hooks, and GPU utilities.
+alwaysApply: false
+---
+
+# TSL + React Setup Guide
+
+This guide covers setting up TSL (Three.js Shading Language) with React Three Fiber using WebGPURenderer.
+
+## Dependencies
+
+```bash
+pnpm add three @react-three/fiber @react-three/drei
+pnpm add -D @types/three
+```
+
+---
+
+## Page Structure
+
+The recommended structure separates the page, canvas, and scene into distinct components:
+
+```tsx
+"use client";
+
+import { Canvas } from "@react-three/fiber";
+import { Suspense } from "react";
+import { WebGPURenderer } from "three/webgpu";
+
+export default function Page() {
+  return (
+    <div className="w-screen h-screen">
+      <Canvas
+        gl={async (props) => {
+          const renderer = new WebGPURenderer(props as any);
+          await renderer.init();
+          return renderer;
+        }}
+      >
+        <Suspense fallback={null}>
+          <Scene />
+        </Suspense>
+      </Canvas>
+    </div>
+  );
+}
+
+function Scene() {
+  // Scene content - has access to R3F context (useThree, useFrame, etc.)
+  return (
+    <>
+      <ambientLight intensity={0.5} />
+      <MyMesh />
+      {/* Camera, lights, environment, etc. */}
+    </>
+  );
+}
+```
+
+### Key Points
+
+1. **WebGPURenderer**: Use the async `gl` prop to initialize WebGPURenderer
+2. **Suspense boundary**: Wrap Scene for async loading (GLTF, textures, etc.)
+3. **Scene component**: Separate component inside Canvas to access R3F hooks
+
+---
+
+## TSL Material Hook Pattern
+
+Create custom hooks to encapsulate TSL materials. This pattern:
+- Creates materials once with `useMemo`
+- Accepts TSL `Node` uniforms as props for dynamic values
+- Returns the material for use in mesh components
+
+### Basic Material Hook
+
+```tsx
+// hooks/use-custom-material.ts
+import { useMemo } from "react";
+import { color, uv, mix } from "three/tsl";
+import { MeshBasicNodeMaterial, Node } from "three/webgpu";
+
+interface CustomMaterialProps {
+  progress: Node; // TSL uniform node
+}
+
+export function useCustomMaterial({ progress }: CustomMaterialProps) {
+  const material = useMemo(() => {
+    const mat = new MeshBasicNodeMaterial();
+
+    // Use TSL nodes for material properties
+    const color1 = color(0xff0000);
+    const color2 = color(0x0000ff);
+    mat.colorNode = mix(color1, color2, progress);
+
+    return mat;
+  }, [progress]);
+
+  return { material };
+}
+```
+
+### Usage with Uniforms
+
+```tsx
+import { uniform } from "three/tsl";
+import { useMemo } from "react";
+import { useFrame } from "@react-three/fiber";
+
+function MyMesh() {
+  // Create uniform once
+  const progress = useMemo(() => uniform(0), []);
+
+  const { material } = useCustomMaterial({ progress });
+
+  // Update uniform value each frame
+  useFrame((state) => {
+    progress.value = Math.sin(state.clock.elapsedTime) * 0.5 + 0.5;
+  });
+
+  return (
+    <mesh material={material}>
+      <boxGeometry />
+    </mesh>
+  );
+}
+```
+
+### Advanced Material with MeshPhysicalNodeMaterial
+
+```tsx
+import { useMemo } from "react";
+import {
+  color,
+  uv,
+  mx_fractal_noise_float,
+  vec3,
+  smoothstep,
+  float,
+} from "three/tsl";
+import { MeshPhysicalNodeMaterial, FrontSide, Node } from "three/webgpu";
+
+interface PBRMaterialProps {
+  reveal: Node;
+}
+
+export function usePBRMaterial({ reveal }: PBRMaterialProps) {
+  const material = useMemo(() => {
+    const mat = new MeshPhysicalNodeMaterial({
+      side: FrontSide,
+    });
+
+    // Color
+    mat.colorNode = color(0x111111);
+
+    // Roughness with noise variation
+    const noiseCoord = vec3(uv().mul(100), 0);
+    const noise = mx_fractal_noise_float(noiseCoord);
+    mat.roughnessNode = smoothstep(float(0.3), float(0.7), noise);
+
+    // Opacity based on reveal uniform
+    mat.opacityNode = reveal;
+    mat.transparent = true;
+
+    return mat;
+  }, [reveal]);
+
+  return { material };
+}
+```
+
+---
+
+## TSL Fn Functions
+
+Use `Fn` to create reusable shader functions:
+
+### Basic Fn Function
+
+```tsx
+import { Fn, float, smoothstep, uv } from "three/tsl";
+import { Node } from "three/webgpu";
+
+// Simple vignette function
+export const vignetteFn = Fn(([intensity]: [Node]) => {
+  const coords = uv().sub(0.5).mul(2.0); // -1 to 1
+  const dist = coords.length();
+  return smoothstep(intensity, intensity.sub(0.3), dist);
+});
+
+// Usage in material
+mat.colorNode = baseColor.mul(vignetteFn(float(0.8)));
+```
+
+### Fn with Multiple Return Values (struct)
+
+```tsx
+import { Fn, struct, float, vec3, smoothstep, step } from "three/tsl";
+import { Node } from "three/webgpu";
+
+// Define return type
+const EffectResult = struct(
+  {
+    opacity: "float",
+    emissive: "float",
+    debug: "vec3",
+  },
+  "EffectResult"
+);
+
+// Fn returning multiple values
+export const effectFn = Fn(([progress]: [Node]) => {
+  const opacity = smoothstep(float(0), float(1), progress);
+  const emissive = step(progress, float(0.5)).mul(0.5);
+  const debug = vec3(progress, opacity, emissive);
+
+  return EffectResult(opacity, emissive, debug);
+});
+
+// Usage
+const result = effectFn(progress);
+mat.opacityNode = result.get("opacity");
+mat.emissiveNode = result.get("emissive");
+```
+
+---
+
+## GPU Utility Functions
+
+Create reusable TSL utilities in `src/lib/gpu/`:
+
+```tsx
+// src/lib/gpu/utils.ts
+import { Fn, abs, clamp, length, sign, sqrt, vec2, select } from "three/tsl";
+import { Node, ConstNode } from "three/webgpu";
+
+/**
+ * Equilateral Triangle SDF
+ * Based on Inigo Quilez's sdEquilateralTriangle
+ */
+export const triangleSdf = Fn(([p, r]: [Node, Node | ConstNode<number>]) => {
+  const k = sqrt(3.0);
+  const px = abs(p.x).sub(r);
+  const py = p.y.add(r.div(k));
+
+  const condition = px.add(k.mul(py)).greaterThan(0);
+  const px2 = select(condition, px.sub(k.mul(py)).div(2), px);
+  const py2 = select(condition, k.negate().mul(px).sub(py).div(2), py);
+
+  const px3 = px2.sub(clamp(px2, r.mul(-2), 0));
+  return length(vec2(px3, py2)).negate().mul(sign(py2));
+});
+
+/**
+ * Circle SDF
+ */
+export const circleSdf = Fn(([p, r]: [Node, Node]) => {
+  return length(p).sub(r);
+});
+```
+
+---
+
+## Common TSL Imports
+
+```tsx
+// Core TSL
+import {
+  uniform,
+  color,
+  vec2,
+  vec3,
+  vec4,
+  float,
+  uv,
+  time,
+  Fn,
+  struct,
+} from "three/tsl";
+
+// Math operations
+import {
+  mix,
+  smoothstep,
+  step,
+  clamp,
+  abs,
+  sign,
+  length,
+  normalize,
+  dot,
+  pow,
+  sqrt,
+  sin,
+  cos,
+} from "three/tsl";
+
+// Noise
+import { mx_fractal_noise_float, mx_noise_float } from "three/tsl";
+
+// Conditionals
+import { If, Else, select, Discard } from "three/tsl";
+
+// Geometry
+import { positionWorld, positionLocal, normalWorld, normalLocal } from "three/tsl";
+
+// Materials
+import {
+  MeshBasicNodeMaterial,
+  MeshPhysicalNodeMaterial,
+  MeshStandardNodeMaterial,
+  Node,
+} from "three/webgpu";
+```
+
+---
+
+## Postprocessing
+
+For postprocessing setup with TSL, refer to the other TSL cursor rules:
+- `tsl_postprocessing.mdc` - Effect reference and custom passes
+- `tsl_postprocessing_react.mdc` - React integration patterns
+
+Basic pattern:
+
+```tsx
+import { usePostProcessing } from "@/src/lib/gpu/use-postprocessing";
+import { useBloomPass } from "@/src/lib/gpu/use-bloom-pass";
+import { renderOutput } from "three/tsl";
+
+function Scene() {
+  const { postProcessing, scenePass } = usePostProcessing({ enabled: true });
+  const { bloomNode } = useBloomPass(scenePass, { strength: 0.7 });
+
+  useEffect(() => {
+    const sceneColor = scenePass.getTextureNode("output");
+    postProcessing.outputNode = renderOutput(sceneColor.add(bloomNode));
+  }, [postProcessing, scenePass, bloomNode]);
+
+  return <>{/* scene content */}</>;
+}
+```
+
+---
+
+## Key Takeaways
+
+1. **WebGPURenderer**: Initialize asynchronously in Canvas `gl` prop
+2. **Separate Scene component**: Access R3F context inside Canvas
+3. **Material hooks with useMemo**: Create materials once, accept Node uniforms
+4. **uniform() for dynamic values**: Update `.value` without recreating materials
+5. **Fn for reusable logic**: Encapsulate shader operations
+6. **struct for multi-returns**: When Fn needs to return multiple values

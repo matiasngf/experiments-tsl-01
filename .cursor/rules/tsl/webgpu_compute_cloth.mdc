@@ -1,0 +1,450 @@
+---
+description: Verlet integration-based cloth simulation using WebGPU compute shaders.
+alwaysApply: false
+---
+
+# WebGPU Compute Cloth Simulation
+
+A Verlet integration-based cloth simulation running entirely on the GPU using Three.js WebGPU compute shaders.
+
+## Overview
+
+This recipe implements a soft-body cloth simulation using:
+- **Verlet Integration**: A stable numerical integration method for particle systems
+- **Spring-Mass System**: Vertices connected by springs that maintain rest lengths
+- **GPU Compute Shaders**: All physics calculations run on the GPU for performance
+
+## Core Concepts
+
+### Verlet System Structure
+
+The cloth is represented as a grid of **vertices** connected by **springs**:
+
+```
+Vertex Grid (5x5 example):
+○───○───○───○───○  ← Fixed vertices (top row, every Nth)
+│╲  │╲  │╲  │╲  │
+○───○───○───○───○
+│╲  │╲  │╲  │╲  │
+○───○───○───○───○
+│╲  │╲  │╲  │╲  │
+○───○───○───○───○
+│╲  │╲  │╲  │╲  │
+○───○───○───○───○
+
+─ = horizontal springs
+│ = vertical springs
+╲ = diagonal springs (both directions)
+```
+
+### Data Structures
+
+#### Vertex Data
+Each vertex stores:
+- `position` (vec3): Current 3D position
+- `force` (vec3): Accumulated velocity/force (Verlet stores velocity implicitly)
+- `params` (uvec3): 
+  - `x`: isFixed (1 = immovable, 0 = free)
+  - `y`: springCount (number of connected springs)
+  - `z`: springPointer (index into spring list)
+
+#### Spring Data
+Each spring stores:
+- `vertexIds` (uvec2): IDs of the two connected vertices
+- `restLength` (float): Target distance between vertices
+- `force` (vec3): Computed spring force
+
+## Implementation Steps
+
+### Step 1: Create Verlet Geometry
+
+```javascript
+import { instancedArray, uniform } from 'three/tsl';
+
+const clothWidth = 1;
+const clothHeight = 1;
+const clothNumSegmentsX = 30;
+const clothNumSegmentsY = 30;
+
+const verletVertices = [];
+const verletSprings = [];
+const verletVertexColumns = [];
+
+// Helper to add a vertex
+const addVerletVertex = (x, y, z, isFixed) => {
+  const id = verletVertices.length;
+  const vertex = {
+    id,
+    position: new THREE.Vector3(x, y, z),
+    isFixed,
+    springIds: [],
+  };
+  verletVertices.push(vertex);
+  return vertex;
+};
+
+// Helper to add a spring between two vertices
+const addVerletSpring = (vertex0, vertex1) => {
+  const id = verletSprings.length;
+  const spring = {
+    id,
+    vertex0,
+    vertex1
+  };
+  vertex0.springIds.push(id);
+  vertex1.springIds.push(id);
+  verletSprings.push(spring);
+  return spring;
+};
+
+// Create vertex grid
+for (let x = 0; x <= clothNumSegmentsX; x++) {
+  const column = [];
+  for (let y = 0; y <= clothNumSegmentsY; y++) {
+    const posX = x * (clothWidth / clothNumSegmentsX) - clothWidth * 0.5;
+    const posZ = y * (clothHeight / clothNumSegmentsY);
+    // Fix some top vertices to hang the cloth
+    const isFixed = (y === 0) && ((x % 5) === 0);
+    const vertex = addVerletVertex(posX, clothHeight * 0.5, posZ, isFixed);
+    column.push(vertex);
+  }
+  verletVertexColumns.push(column);
+}
+
+// Create springs (horizontal, vertical, and diagonal)
+for (let x = 0; x <= clothNumSegmentsX; x++) {
+  for (let y = 0; y <= clothNumSegmentsY; y++) {
+    const vertex0 = verletVertexColumns[x][y];
+    if (x > 0) addVerletSpring(vertex0, verletVertexColumns[x - 1][y]);      // horizontal
+    if (y > 0) addVerletSpring(vertex0, verletVertexColumns[x][y - 1]);      // vertical
+    if (x > 0 && y > 0) addVerletSpring(vertex0, verletVertexColumns[x - 1][y - 1]);  // diagonal ↖
+    if (x > 0 && y < clothNumSegmentsY) addVerletSpring(vertex0, verletVertexColumns[x - 1][y + 1]); // diagonal ↙
+  }
+}
+```
+
+### Step 2: Create GPU Buffers
+
+```javascript
+// Build spring list ordered by vertex (for efficient GPU access)
+const springListArray = [];
+const vertexPositionArray = new Float32Array(vertexCount * 3);
+const vertexParamsArray = new Uint32Array(vertexCount * 3);
+
+for (let i = 0; i < vertexCount; i++) {
+  const vertex = verletVertices[i];
+  
+  // Position
+  vertexPositionArray[i * 3] = vertex.position.x;
+  vertexPositionArray[i * 3 + 1] = vertex.position.y;
+  vertexPositionArray[i * 3 + 2] = vertex.position.z;
+  
+  // Params: isFixed, springCount, springPointer
+  vertexParamsArray[i * 3] = vertex.isFixed ? 1 : 0;
+  if (!vertex.isFixed) {
+    vertexParamsArray[i * 3 + 1] = vertex.springIds.length;
+    vertexParamsArray[i * 3 + 2] = springListArray.length;
+    springListArray.push(...vertex.springIds);
+  }
+}
+
+// Create instanced arrays (GPU buffers)
+const vertexPositionBuffer = instancedArray(vertexPositionArray, 'vec3').setPBO(true);
+const vertexForceBuffer = instancedArray(vertexCount, 'vec3');
+const vertexParamsBuffer = instancedArray(vertexParamsArray, 'uvec3');
+const springListBuffer = instancedArray(new Uint32Array(springListArray), 'uint').setPBO(true);
+
+// Spring buffers
+const springVertexIdArray = new Uint32Array(springCount * 2);
+const springRestLengthArray = new Float32Array(springCount);
+
+for (let i = 0; i < springCount; i++) {
+  const spring = verletSprings[i];
+  springVertexIdArray[i * 2] = spring.vertex0.id;
+  springVertexIdArray[i * 2 + 1] = spring.vertex1.id;
+  springRestLengthArray[i] = spring.vertex0.position.distanceTo(spring.vertex1.position);
+}
+
+const springVertexIdBuffer = instancedArray(springVertexIdArray, 'uvec2').setPBO(true);
+const springRestLengthBuffer = instancedArray(springRestLengthArray, 'float');
+const springForceBuffer = instancedArray(springCount * 3, 'vec3').setPBO(true);
+```
+
+### Step 3: Create Compute Shaders
+
+```javascript
+import { Fn, If, Return, instanceIndex, uint, Loop, float, select, triNoise3D, time } from 'three/tsl';
+
+// Uniforms for simulation parameters
+const dampeningUniform = uniform(0.99);
+const stiffnessUniform = uniform(0.2);
+const spherePositionUniform = uniform(new THREE.Vector3(0, 0, 0));
+const sphereUniform = uniform(1.0);
+const windUniform = uniform(1.0);
+const sphereRadius = 0.15;
+
+// COMPUTE SHADER 1: Calculate spring forces
+const computeSpringForces = Fn(() => {
+  // Guard: skip if instanceIndex exceeds spring count
+  If(instanceIndex.greaterThanEqual(uint(springCount)), () => {
+    Return();
+  });
+
+  const vertexIds = springVertexIdBuffer.element(instanceIndex);
+  const restLength = springRestLengthBuffer.element(instanceIndex);
+
+  const vertex0Position = vertexPositionBuffer.element(vertexIds.x);
+  const vertex1Position = vertexPositionBuffer.element(vertexIds.y);
+
+  // Hooke's Law: F = -k * (|x| - rest) * normalized(x)
+  const delta = vertex1Position.sub(vertex0Position).toVar();
+  const dist = delta.length().max(0.000001).toVar(); // Avoid division by zero
+  const force = dist.sub(restLength).mul(stiffnessUniform).mul(delta).mul(0.5).div(dist);
+  
+  springForceBuffer.element(instanceIndex).assign(force);
+
+})().compute(springCount).setName('Spring Forces');
+
+// COMPUTE SHADER 2: Accumulate forces and update positions
+const computeVertexForces = Fn(() => {
+  // Guard: skip if instanceIndex exceeds vertex count
+  If(instanceIndex.greaterThanEqual(uint(vertexCount)), () => {
+    Return();
+  });
+
+  const params = vertexParamsBuffer.element(instanceIndex).toVar();
+  const isFixed = params.x;
+  const springCount = params.y;
+  const springPointer = params.z;
+
+  // Skip fixed vertices
+  If(isFixed, () => {
+    Return();
+  });
+
+  const position = vertexPositionBuffer.element(instanceIndex).toVar('vertexPosition');
+  const force = vertexForceBuffer.element(instanceIndex).toVar('vertexForce');
+
+  // Apply dampening (energy loss)
+  force.mulAssign(dampeningUniform);
+
+  // Accumulate spring forces
+  const ptrStart = springPointer.toVar('ptrStart');
+  const ptrEnd = ptrStart.add(springCount).toVar('ptrEnd');
+
+  Loop({ start: ptrStart, end: ptrEnd, type: 'uint', condition: '<' }, ({ i }) => {
+    const springId = springListBuffer.element(i).toVar('springId');
+    const springForce = springForceBuffer.element(springId);
+    const springVertexIds = springVertexIdBuffer.element(springId);
+    // Direction depends on which end of the spring this vertex is
+    const factor = select(springVertexIds.x.equal(instanceIndex), 1.0, -1.0);
+    force.addAssign(springForce.mul(factor));
+  });
+
+  // Gravity
+  force.y.subAssign(0.00005);
+
+  // Wind (using procedural noise)
+  const noise = triNoise3D(position, 1, time).sub(0.2).mul(0.0001);
+  const windForce = noise.mul(windUniform);
+  force.z.subAssign(windForce);
+
+  // Sphere collision
+  const deltaSphere = position.add(force).sub(spherePositionUniform);
+  const dist = deltaSphere.length();
+  const sphereForce = float(sphereRadius).sub(dist).max(0).mul(deltaSphere).div(dist).mul(sphereUniform);
+  force.addAssign(sphereForce);
+
+  // Update buffers
+  vertexForceBuffer.element(instanceIndex).assign(force);
+  vertexPositionBuffer.element(instanceIndex).addAssign(force);
+
+})().compute(vertexCount).setName('Vertex Forces');
+```
+
+### Step 4: Create Cloth Mesh
+
+```javascript
+import { attribute, cross, transformNormalToView } from 'three/tsl';
+
+// Create geometry where each vertex is centered between 4 verlet vertices
+const vertexCount = clothNumSegmentsX * clothNumSegmentsY;
+const geometry = new THREE.BufferGeometry();
+const verletVertexIdArray = new Uint32Array(vertexCount * 4);
+const indices = [];
+
+const getIndex = (x, y) => y * clothNumSegmentsX + x;
+
+for (let x = 0; x < clothNumSegmentsX; x++) {
+  for (let y = 0; y < clothNumSegmentsY; y++) {
+    const index = getIndex(x, y);
+    // Store 4 verlet vertex IDs that contribute to this mesh vertex
+    verletVertexIdArray[index * 4] = verletVertexColumns[x][y].id;
+    verletVertexIdArray[index * 4 + 1] = verletVertexColumns[x + 1][y].id;
+    verletVertexIdArray[index * 4 + 2] = verletVertexColumns[x][y + 1].id;
+    verletVertexIdArray[index * 4 + 3] = verletVertexColumns[x + 1][y + 1].id;
+
+    if (x > 0 && y > 0) {
+      indices.push(getIndex(x, y), getIndex(x - 1, y), getIndex(x - 1, y - 1));
+      indices.push(getIndex(x, y), getIndex(x - 1, y - 1), getIndex(x, y - 1));
+    }
+  }
+}
+
+geometry.setAttribute('vertexIds', new THREE.BufferAttribute(verletVertexIdArray, 4, false));
+geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3, false));
+geometry.setIndex(indices);
+
+// Material with custom position/normal from GPU buffers
+const clothMaterial = new THREE.MeshPhysicalNodeMaterial({
+  color: 0x204080,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.85,
+  sheen: 1.0,
+  sheenRoughness: 0.5,
+  sheenColor: 0xffffff,
+});
+
+clothMaterial.positionNode = Fn(({ material }) => {
+  const vertexIds = attribute('vertexIds');
+  const v0 = vertexPositionBuffer.element(vertexIds.x).toVar();
+  const v1 = vertexPositionBuffer.element(vertexIds.y).toVar();
+  const v2 = vertexPositionBuffer.element(vertexIds.z).toVar();
+  const v3 = vertexPositionBuffer.element(vertexIds.w).toVar();
+
+  // Calculate tangent and bitangent for normal
+  const top = v0.add(v1);
+  const right = v1.add(v3);
+  const bottom = v2.add(v3);
+  const left = v0.add(v2);
+
+  const tangent = right.sub(left).normalize();
+  const bitangent = bottom.sub(top).normalize();
+  const normal = cross(tangent, bitangent);
+
+  // Pass normal to fragment shader
+  material.normalNode = transformNormalToView(normal).toVarying();
+
+  // Return averaged position
+  return v0.add(v1).add(v2).add(v3).mul(0.25);
+})();
+
+const clothMesh = new THREE.Mesh(geometry, clothMaterial);
+clothMesh.frustumCulled = false;
+scene.add(clothMesh);
+```
+
+### Step 5: Animation Loop
+
+```javascript
+const clock = new THREE.Clock();
+let timeSinceLastStep = 0;
+let timestamp = 0;
+const stepsPerSecond = 360; // Fixed timestep for stability
+const timePerStep = 1 / stepsPerSecond;
+
+async function render() {
+  const deltaTime = Math.min(clock.getDelta(), 1 / 60);
+  timeSinceLastStep += deltaTime;
+
+  // Run simulation at fixed timestep
+  while (timeSinceLastStep >= timePerStep) {
+    timestamp += timePerStep;
+    timeSinceLastStep -= timePerStep;
+    
+    // Update collision sphere position
+    sphere.position.set(Math.sin(timestamp * 2.1) * 0.1, 0, Math.sin(timestamp * 0.8));
+    spherePositionUniform.value.copy(sphere.position);
+    
+    // Execute compute shaders
+    renderer.compute(computeSpringForces);
+    renderer.compute(computeVertexForces);
+  }
+
+  renderer.render(scene, camera);
+}
+
+renderer.setAnimationLoop(render);
+```
+
+## Key Implementation Details
+
+### Buffer Layout Strategy
+
+The `springListBuffer` is crucial for GPU efficiency:
+```
+Vertex 0: springs [0, 3, 7]     → springList[0..2]
+Vertex 1: springs [1, 4, 8, 9]  → springList[3..6]
+Vertex 2: springs [2, 5]        → springList[7..8]
+...
+
+vertexParams for Vertex 1:
+  - isFixed: 0
+  - springCount: 4
+  - springPointer: 3  ← index into springListBuffer
+```
+
+### Why `.setPBO(true)`
+
+For WebGL fallback compatibility, buffers that need to be read in vertex shaders should use `.setPBO(true)` (Pixel Buffer Object). This is only needed for the WebGL backend.
+
+### Fixed Timestep Simulation
+
+The simulation runs at a fixed 360 steps/second regardless of frame rate:
+- **Stability**: Prevents explosion on low FPS
+- **Determinism**: Same behavior across different devices
+- **Accumulator pattern**: Handles frame time variations
+
+### Spring Force Direction
+
+Each spring affects two vertices in opposite directions:
+```javascript
+const factor = select(springVertexIds.x.equal(instanceIndex), 1.0, -1.0);
+force.addAssign(springForce.mul(factor));
+```
+
+## Customization Options
+
+### Cloth Rigidity
+Add more springs between distant vertices:
+```javascript
+if (x > 1) addVerletSpring(vertex0, verletVertexColumns[x - 2][y]);
+if (y > 1) addVerletSpring(vertex0, verletVertexColumns[x][y - 2]);
+```
+
+### Simulation Parameters
+- `stiffness` (0.1-0.5): Spring strength
+- `dampening` (0.95-0.999): Energy conservation
+- `gravity`: Force applied each step
+- `wind`: Noise-based force multiplier
+
+### Pin Points
+Change which vertices are fixed:
+```javascript
+// Pin corners only
+const isFixed = (y === 0) && (x === 0 || x === clothNumSegmentsX);
+
+// Pin entire top edge
+const isFixed = (y === 0);
+```
+
+## Dependencies
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { 
+  Fn, If, Return, Loop,
+  instancedArray, instanceIndex, uniform,
+  select, attribute, uint, float,
+  transformNormalToView, cross, triNoise3D, time 
+} from 'three/tsl';
+```
+
+## Performance Considerations
+
+1. **Compute shader workgroups**: Shaders execute in groups of 64 threads; guard against out-of-bounds access
+2. **Buffer reads**: Minimize redundant buffer reads in shaders
+3. **Fixed timestep**: Prevents physics explosion but may require multiple compute passes per frame
+4. **Mesh vertex count**: The rendered mesh has fewer vertices than the simulation grid (vertices are averaged from 4 simulation points)
+

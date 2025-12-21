@@ -1,0 +1,324 @@
+---
+description: Instructions to setup an experiments system on a Next.js app with auto-generated navigation and routing.
+alwaysApply: false
+---
+
+# Experiments System Setup for Next.js
+
+This guide explains how to set up an experiments/playground system in a Next.js project where each experiment is a separate page, automatically discovered and listed in a navigation menu.
+
+## Overview
+
+The system consists of:
+
+1. **Experiments folder**: Route group containing experiment pages
+2. **Generator script**: Scans experiments and generates a JSON manifest
+3. **Navigation component**: Reads the manifest and renders links
+4. **Home page**: Redirects to the first experiment
+
+## Folder Structure
+
+```
+src/
+  app/
+    (experiments)/          # Route group (parentheses = no URL prefix)
+      experiment-name/
+        page.tsx            # Each experiment is a page
+      another-experiment/
+        page.tsx
+    layout.tsx              # Root layout with Header
+    page.tsx                # Home page (redirects to first experiment)
+experiments.json            # Auto-generated manifest
+get-experiments.ts          # Generator script
+```
+
+## Step 1: Create the Generator Script
+
+Create `get-experiments.ts` at the project root:
+
+```ts
+import { readdir, writeFile } from "fs/promises";
+import { join } from "path";
+
+interface Experiment {
+  url: string;
+  name: string;
+}
+
+async function getExperiments(): Promise<Experiment[]> {
+  const experimentsDir = join(process.cwd(), "src/app/(experiments)");
+  const entries = await readdir(experimentsDir, { withFileTypes: true });
+
+  const experiments: Experiment[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const folderName = entry.name;
+
+    try {
+      // Format folder name nicely: "my-experiment" -> "My Experiment"
+      const experimentName = folderName
+        .split("-")
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" ");
+
+      experiments.push({
+        url: `/${folderName}`,
+        name: experimentName,
+      });
+    } catch (error) {
+      console.warn(`Skipping ${folderName}: could not process`);
+    }
+  }
+
+  return experiments.sort((a, b) => {
+    // Extract numeric prefix from URL (e.g., "/1-my-experiment" -> 1)
+    const getNumber = (url: string) => {
+      const match = url.match(/^\/(\d+)-/);
+      return match ? parseInt(match[1], 10) : Infinity;
+    };
+
+    const numA = getNumber(a.url);
+    const numB = getNumber(b.url);
+
+    // Sort by numeric prefix first, then alphabetically
+    if (numA !== numB) {
+      return numA - numB;
+    }
+    return a.name.localeCompare(b.name);
+  });
+}
+
+async function main() {
+  try {
+    const experiments = await getExperiments();
+    const outputPath = join(process.cwd(), "experiments.json");
+    await writeFile(outputPath, JSON.stringify(experiments, null, 2), "utf-8");
+    console.log(`Generated ${experiments.length} experiments in ${outputPath}`);
+  } catch (error) {
+    console.error("Error generating experiments:", error);
+    process.exit(1);
+  }
+}
+
+main();
+```
+
+## Step 2: Add npm Script
+
+Add to `package.json`:
+
+```json
+{
+  "scripts": {
+    "experiments": "npx tsx get-experiments.ts"
+  }
+}
+```
+
+**Required dev dependency:**
+
+```bash
+pnpm add -D tsx
+# or
+npm install -D tsx
+```
+
+## Step 3: Create the Experiments Folder
+
+Create the route group folder:
+
+```bash
+mkdir -p src/app/\(experiments\)
+```
+
+Create your first experiment in `src/app/(experiments)/my-first-experiment/page.tsx`:
+
+```tsx
+export default function MyFirstExperiment() {
+  return (
+    <div className="flex items-center justify-center h-screen">
+      <h1 className="text-2xl font-bold">My First Experiment</h1>
+    </div>
+  );
+}
+```
+
+## Step 4: Create the Header Navigation
+
+Create `src/components/layout/header.tsx`:
+
+```tsx
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/src/components/ui/dropdown-menu";
+import experiments from "../../../experiments.json";
+
+export function Header() {
+  const pathname = usePathname();
+
+  return (
+    <header className="fixed top-4 left-4 z-50">
+      <DropdownMenu>
+        <DropdownMenuTrigger className="px-3 py-1.5 text-sm border rounded-md bg-white/80 backdrop-blur-sm hover:bg-white transition-colors outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-300">
+          Menu
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-[180px]">
+          {experiments.map((experiment) => {
+            const isActive = pathname === experiment.url;
+            return (
+              <DropdownMenuItem key={experiment.url} asChild>
+                <Link
+                  href={experiment.url}
+                  className={isActive ? "font-medium" : ""}
+                >
+                  {experiment.name}
+                </Link>
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </header>
+  );
+}
+```
+
+> **Note:** This uses shadcn/ui dropdown. Install with: `npx shadcn@latest add dropdown-menu`
+
+## Step 5: Update the Root Layout
+
+Update `src/app/layout.tsx` to include the Header:
+
+```tsx
+import type { Metadata } from "next";
+import "./globals.css";
+import { Header } from "../components/layout/header";
+
+export const metadata: Metadata = {
+  title: "Experiments",
+  description: "A collection of experiments",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body>
+        <Header />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+## Step 6: Create the Home Page Redirect
+
+Update `src/app/page.tsx` to redirect to the first experiment:
+
+```tsx
+import { redirect } from "next/navigation";
+import experiments from "../../experiments.json";
+
+export default function Home() {
+  const firstExperiment = experiments[0];
+
+  if (firstExperiment) {
+    redirect(firstExperiment.url);
+  }
+
+  return null;
+}
+```
+
+## Step 7: Generate the Experiments Manifest
+
+Run the generator:
+
+```bash
+pnpm experiments
+# or
+npm run experiments
+```
+
+This creates `experiments.json`:
+
+```json
+[
+  {
+    "url": "/my-first-experiment",
+    "name": "My First Experiment"
+  }
+]
+```
+
+## Usage
+
+### Adding a New Experiment
+
+1. Create a new folder in `src/app/(experiments)/`:
+
+   ```bash
+   mkdir src/app/\(experiments\)/new-experiment
+   ```
+
+2. Add a `page.tsx`:
+
+   ```tsx
+   export default function NewExperiment() {
+     return <div>New Experiment</div>;
+   }
+   ```
+
+3. Regenerate the manifest:
+   ```bash
+   pnpm experiments
+   ```
+
+### Ordering Experiments
+
+Prefix folder names with numbers to control order:
+
+```
+src/app/(experiments)/
+  01-first-experiment/
+  02-second-experiment/
+  03-third-experiment/
+```
+
+The generator sorts numerically, then alphabetically.
+
+## Dependencies Summary
+
+```bash
+# Required
+pnpm add -D tsx
+
+# Optional (for the dropdown navigation)
+npx shadcn@latest add dropdown-menu
+```
+
+## TypeScript Configuration
+
+If importing `experiments.json`, ensure `tsconfig.json` has:
+
+```json
+{
+  "compilerOptions": {
+    "resolveJsonModule": true,
+    "esModuleInterop": true
+  }
+}
+```

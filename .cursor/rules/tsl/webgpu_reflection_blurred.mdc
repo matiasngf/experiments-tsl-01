@@ -1,0 +1,261 @@
+---
+description: Blurred reflection effect with depth-aware hash blur on floor surfaces.
+alwaysApply: false
+---
+
+# Blurred Reflection Effect
+
+This recipe explains how to implement a blurred reflection effect on a floor surface using Three.js WebGPU and TSL (Three Shader Language). The effect combines a reflector with depth-aware hash blur, animated visual elements, and opacity falloff.
+
+## Overview
+
+The effect creates a glass-like floor that reflects the scene with controllable blur based on roughness and radius parameters. It also incorporates animated circular patterns and fog-like opacity to fade the floor at distance.
+
+## Required Imports
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { 
+  Fn, vec4, fract, sample, abs, uniform, pow, color, max, length, 
+  rangeFogFactor, sub, reflector, normalWorld, hue, time, mix, positionWorld 
+} from 'three/tsl';
+
+import { hashBlur } from 'three/addons/tsl/display/hashBlur.js';
+```
+
+## Key Components
+
+### 1. Creating the Reflector
+
+The `reflector()` function creates a reflection render target that captures the scene from the floor's perspective:
+
+```javascript
+const reflection = reflector({ 
+  resolutionScale: 0.5,  // Half resolution for performance
+  depth: true,           // Enable depth buffer capture
+  bounces: false         // Disable recursive reflections
+});
+
+const reflectionDepth = reflection.getDepthNode();
+
+// Position and orient the reflector target
+reflection.target.rotateX(-Math.PI / 2);  // Face upward for floor reflection
+scene.add(reflection.target);
+```
+
+**Important:** The reflector target must be added to the scene and oriented correctly. For a floor reflection, rotate by `-Math.PI / 2` around X.
+
+### 2. Creating the Blurred Reflection Material
+
+Use `MeshStandardNodeMaterial` with a custom `colorNode` to implement the effect:
+
+```javascript
+const roughness = uniform(0.9);
+const radius = uniform(0.2);
+
+const floorMaterial = new THREE.MeshStandardNodeMaterial();
+floorMaterial.transparent = true;
+
+floorMaterial.colorNode = Fn(() => {
+  // Effect implementation goes here
+  return vec4(output, opacity);
+})();
+```
+
+### 3. Depth-Masked Sampling
+
+Mask the reflection sample using depth to create a proper cutout:
+
+```javascript
+const maskReflection = sample((uv) => {
+  const sample = reflection.sample(uv);
+  const mask = reflectionDepth.sample(uv);
+  return vec4(sample.rgb, sample.a.mul(mask.r));
+}, reflection.uvNode);
+```
+
+**How it works:**
+- `reflection.sample(uv)` - samples the reflection color
+- `reflectionDepth.sample(uv)` - samples the depth buffer
+- The depth value is used as an alpha mask
+
+### 4. Applying Hash Blur
+
+The `hashBlur` function creates a randomized blur effect:
+
+```javascript
+const radiusRange = mix(0.01, 0.1, radius);  // Map uniform to usable range
+
+const reflectionBlurred = hashBlur(maskReflection, radiusRange, {
+  repeats: 40,              // Number of blur samples
+  premultipliedAlpha: true  // Handle alpha correctly
+});
+```
+
+**Parameters:**
+- `maskReflection` - the input to blur (a sample function)
+- `radiusRange` - blur radius (0.01-0.1 works well)
+- `repeats` - more samples = smoother blur but more expensive
+- `premultipliedAlpha` - set to true when working with alpha channels
+
+### 5. Compositing the Reflection
+
+Blend the sharp and blurred reflections based on roughness:
+
+```javascript
+const roughnessRange = mix(0.3, 0.03, roughness);  // Inverse mapping for roughness
+
+// Create mask from blur alpha and depth
+const reflectionMask = reflectionBlurred.a
+  .mul(reflectionDepth)
+  .remapClamp(0, roughnessRange);
+
+// Control reflection intensity
+const reflectionIntensity = 0.1;
+
+// Mix factor based on mask and roughness
+const reflectionMixFactor = reflectionMask.mul(roughness.mul(2).min(1));
+
+// Blend sharp and blurred reflections
+const reflectionFinal = mix(
+  reflection.rgb,
+  reflectionBlurred.rgb,
+  reflectionMixFactor
+).mul(reflectionIntensity);
+```
+
+### 6. Distance-Based Opacity Falloff
+
+Use `rangeFogFactor` to fade the floor at distance:
+
+```javascript
+const opacity = rangeFogFactor(7, 25).oneMinus();  // Fade between 7 and 25 units
+return vec4(output, opacity);
+```
+
+## Complete Floor Material Implementation
+
+```javascript
+const roughness = uniform(0.9);
+const radius = uniform(0.2);
+
+const reflection = reflector({ resolutionScale: 0.5, depth: true, bounces: false });
+const reflectionDepth = reflection.getDepthNode();
+reflection.target.rotateX(-Math.PI / 2);
+scene.add(reflection.target);
+
+const floorMaterial = new THREE.MeshStandardNodeMaterial();
+floorMaterial.transparent = true;
+
+floorMaterial.colorNode = Fn(() => {
+  // Range adjustments
+  const radiusRange = mix(0.01, 0.1, radius);
+  const roughnessRange = mix(0.3, 0.03, roughness);
+
+  // Depth-masked sampling
+  const maskReflection = sample((uv) => {
+    const samp = reflection.sample(uv);
+    const mask = reflectionDepth.sample(uv);
+    return vec4(samp.rgb, samp.a.mul(mask.r));
+  }, reflection.uvNode);
+
+  // Apply blur
+  const reflectionBlurred = hashBlur(maskReflection, radiusRange, {
+    repeats: 40,
+    premultipliedAlpha: true
+  });
+
+  // Composite reflection
+  const reflectionMask = reflectionBlurred.a.mul(reflectionDepth).remapClamp(0, roughnessRange);
+  const reflectionIntensity = 0.1;
+  const reflectionMixFactor = reflectionMask.mul(roughness.mul(2).min(1));
+  const reflectionFinal = mix(reflection.rgb, reflectionBlurred.rgb, reflectionMixFactor)
+    .mul(reflectionIntensity);
+
+  // Apply fog-like opacity falloff
+  const opacity = rangeFogFactor(7, 25).oneMinus();
+
+  return vec4(reflectionFinal, opacity);
+})();
+
+const floor = new THREE.Mesh(new THREE.BoxGeometry(50, 0.001, 50), floorMaterial);
+scene.add(floor);
+```
+
+## Bonus: Animated Circle Effect
+
+The example includes an animated circular wave pattern on the floor:
+
+```javascript
+const drawCircle = Fn(([pos, radius, width, power, color, timer = time.mul(0.5)]) => {
+  const dist1 = length(pos);
+  dist1.assign(fract(dist1.mul(5.0).sub(fract(timer))));
+  const dist2 = dist1.sub(radius);
+  const intensity = pow(radius.div(abs(dist2)), width);
+  const col = color.rgb.mul(intensity).mul(power).mul(max(sub(0.8, abs(dist2)), 0.0));
+  return col;
+});
+
+// Create animated color gradient based on world position
+const circleFadeY = positionWorld.y.mul(0.7).oneMinus().max(0);
+const animatedColor = mix(
+  color(0x74ccf4), 
+  color(0x7f00c5), 
+  positionWorld.xz.distance(0).div(10).clamp()
+);
+
+// Apply hue shift over time
+const animatedCircle = hue(
+  drawCircle(positionWorld.xz.mul(0.1), 0.5, 0.8, 0.01, animatedColor).mul(circleFadeY),
+  time
+);
+```
+
+To combine with reflection:
+
+```javascript
+const output = animatedCircle.add(reflectionFinal);
+return vec4(output, opacity);
+```
+
+## Parameters Reference
+
+| Parameter | Type | Range | Description |
+|-----------|------|-------|-------------|
+| `resolutionScale` | number | 0.25-1.0 | Reflection render resolution (0.5 = half) |
+| `roughness` | uniform | 0-1 | Controls blur intensity and mix factor |
+| `radius` | uniform | 0-1 | Controls blur sample spread |
+| `repeats` | number | 10-60 | Hash blur sample count |
+| `reflectionIntensity` | number | 0-1 | Overall reflection brightness |
+
+## Performance Tips
+
+1. **Lower `resolutionScale`** for better performance (0.25-0.5)
+2. **Reduce `repeats`** in hashBlur for faster rendering
+3. **Set `bounces: false`** to prevent recursive reflection rendering
+4. **Use `rangeFogFactor`** to skip rendering distant floor pixels
+
+## Renderer Setup
+
+```javascript
+renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setAnimationLoop(animate);
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.3;
+```
+
+## Scene Background with Animated Hue
+
+Create an animated background using normalWorld:
+
+```javascript
+scene.backgroundNode = hue(
+  normalWorld.y.mix(0, color(0x0066ff)).mul(0.1),
+  time
+);
+```
+
+This creates a subtle color shift based on viewing angle with time-based hue rotation.
+

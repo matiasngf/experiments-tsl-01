@@ -1,0 +1,217 @@
+---
+description: Mirror and reflector effect implementation using WebGPU and TSL.
+alwaysApply: false
+---
+
+# WebGPU Mirror / Reflector Effect
+
+This recipe explains how to create mirror reflections using Three.js WebGPU and TSL (Three Shading Language).
+
+## Overview
+
+Mirror reflections are achieved using the `reflector()` TSL function, which creates a real-time reflection of the scene on a surface. The reflection can be enhanced with normal map distortions and blended with other colors or textures.
+
+## Required Imports
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { reflector, uv, texture, color } from 'three/tsl';
+```
+
+## Basic Reflector Setup
+
+### 1. Create a Reflector Node
+
+```javascript
+const groundReflector = reflector();
+```
+
+The `reflector()` function returns a TSL node that captures and renders the scene from the reflection's perspective.
+
+### 2. Attach Reflector to a Mesh
+
+The reflector needs a target mesh to define where the reflection occurs. Add the reflector's target as a child of the mesh:
+
+```javascript
+const planeGeo = new THREE.PlaneGeometry(100, 100);
+const planeMaterial = new THREE.MeshPhongNodeMaterial({
+    colorNode: groundReflector
+});
+
+const plane = new THREE.Mesh(planeGeo, planeMaterial);
+plane.rotateX(-Math.PI / 2); // Rotate to make it a floor
+plane.add(groundReflector.target); // Critical: attach the target
+scene.add(plane);
+```
+
+**Important:** You must add `reflector.target` as a child of the mesh that displays the reflection. This tells the reflector where the reflective surface is positioned in the scene.
+
+## Adding Normal Map Distortion
+
+To create realistic water-like or imperfect mirror effects, distort the reflection UVs using a normal map:
+
+### Ground Reflection with Decal Normal Map
+
+```javascript
+const textureLoader = new THREE.TextureLoader();
+const decalNormal = textureLoader.load('textures/decal/decal-normal.jpg');
+
+const normalScale = -0.08; // Negative values invert the distortion
+
+// Calculate UV offset from normal map
+const uvOffset = texture(decalNormal).xy.mul(2).sub(1).mul(normalScale);
+
+// Apply offset to reflector UVs
+groundReflector.uvNode = groundReflector.uvNode.add(uvOffset);
+```
+
+### Tiled Normal Map (for larger surfaces)
+
+```javascript
+const floorNormal = textureLoader.load('textures/floors/FloorsCheckerboard_S_Normal.jpg');
+floorNormal.wrapS = THREE.RepeatWrapping;
+floorNormal.wrapT = THREE.RepeatWrapping;
+
+const normalScale = 0.1;
+
+// Tile the normal map by multiplying UVs
+const uvOffset = texture(floorNormal, uv().mul(5)).xy.mul(2).sub(1).mul(normalScale);
+
+verticalReflector.uvNode = verticalReflector.uvNode.add(uvOffset);
+```
+
+## Blending Reflections with Colors/Textures
+
+### Mix with Texture Alpha
+
+Use a texture's alpha channel to blend between a base color and the reflection:
+
+```javascript
+const decalDiffuse = textureLoader.load('textures/decal/decal-diffuse.png');
+decalDiffuse.colorSpace = THREE.SRGBColorSpace;
+
+// Where alpha is 0: show white, where alpha is 1: show reflection
+const groundNode = texture(decalDiffuse).a.mix(color(0xffffff), groundReflector);
+```
+
+### Tint the Reflection
+
+Add a color tint to the reflection:
+
+```javascript
+// Blue tinted mirror
+const verticalNode = color(0x0000ff).mul(0.1).add(verticalReflector);
+```
+
+## Complete Example: Floor and Wall Mirrors
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { reflector, uv, texture, color } from 'three/tsl';
+
+// Create reflectors
+const groundReflector = reflector();
+const wallReflector = reflector();
+
+// Load normal maps for distortion
+const textureLoader = new THREE.TextureLoader();
+const floorNormal = textureLoader.load('textures/normal-map.jpg');
+floorNormal.wrapS = THREE.RepeatWrapping;
+floorNormal.wrapT = THREE.RepeatWrapping;
+
+// Apply UV distortion to ground reflector
+const groundUVOffset = texture(floorNormal, uv().mul(5)).xy.mul(2).sub(1).mul(0.08);
+groundReflector.uvNode = groundReflector.uvNode.add(groundUVOffset);
+
+// Create floor with reflection
+const floorGeometry = new THREE.PlaneGeometry(100, 100);
+const floorMaterial = new THREE.MeshPhongNodeMaterial({
+    colorNode: groundReflector
+});
+
+const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+floor.rotateX(-Math.PI / 2);
+floor.add(groundReflector.target);
+scene.add(floor);
+
+// Create wall with tinted reflection
+const wallGeometry = new THREE.PlaneGeometry(100, 100);
+const wallMaterial = new THREE.MeshPhongNodeMaterial({
+    colorNode: color(0x0000ff).mul(0.1).add(wallReflector)
+});
+
+const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+wall.position.set(0, 50, -50);
+wall.add(wallReflector.target);
+scene.add(wall);
+```
+
+## Using with Inspector (Debug)
+
+For debugging, you can name reflectors using `.toInspector()`:
+
+```javascript
+const groundReflector = reflector().toInspector('Ground Reflector');
+```
+
+This requires setting up the inspector on the renderer:
+
+```javascript
+import { Inspector } from 'three/addons/inspector/Inspector.js';
+
+renderer.inspector = new Inspector();
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `reflector()` | TSL function that creates a reflection node |
+| `reflector.target` | Object3D that must be added as child of the reflective mesh |
+| `reflector.uvNode` | The UV coordinates used for sampling the reflection texture |
+| UV distortion | Modify `uvNode` to add normal-map-based distortion effects |
+| Blending | Use TSL functions like `.mix()`, `.add()`, `.mul()` to combine reflections with other colors |
+
+## Material Compatibility
+
+Reflectors work with node-based materials:
+- `MeshPhongNodeMaterial`
+- `MeshStandardNodeMaterial`
+- `MeshBasicNodeMaterial`
+- Any material using `colorNode`
+
+## Performance Considerations
+
+1. Each reflector renders the scene from a different viewpoint, effectively doubling (or more) the render cost
+2. Use sparingly - one or two reflectors per scene is typically sufficient
+3. Consider reducing geometry complexity in reflected objects
+4. The reflection automatically handles the camera position relative to the reflective surface
+
+## Common Patterns
+
+### Perfect Mirror
+```javascript
+const mirror = reflector();
+material.colorNode = mirror;
+```
+
+### Frosted/Distorted Mirror
+```javascript
+const mirror = reflector();
+const distortion = texture(normalMap).xy.mul(2).sub(1).mul(0.05);
+mirror.uvNode = mirror.uvNode.add(distortion);
+material.colorNode = mirror;
+```
+
+### Partial Reflection (Glass-like)
+```javascript
+const mirror = reflector();
+material.colorNode = color(0xffffff).mul(0.7).add(mirror.mul(0.3));
+```
+
+### Colored Mirror
+```javascript
+const mirror = reflector();
+material.colorNode = mirror.mul(color(0xaaccff));
+```
+

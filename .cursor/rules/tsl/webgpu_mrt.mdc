@@ -1,0 +1,227 @@
+---
+description: Multiple Render Targets (MRT) for deferred rendering and post-processing.
+alwaysApply: false
+---
+
+# WebGPU Multiple Render Targets (MRT)
+
+This recipe explains how to implement Multiple Render Targets (MRT) in Three.js WebGPU. MRT allows you to output multiple pieces of data from a single render pass—such as color, normals, emissive, and diffuse—which is essential for deferred rendering, post-processing effects, and advanced compositing.
+
+## Core Concept
+
+MRT renders a scene once but writes to multiple textures simultaneously. Each texture captures different information:
+- **Output**: The final lit/shaded color
+- **Normal**: View-space normals (encoded as colors)
+- **Diffuse**: Base material color without lighting
+- **Emissive**: Self-illumination/glow data
+
+## Required Imports
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { 
+  output, 
+  normalView, 
+  pass, 
+  step, 
+  diffuseColor, 
+  emissive, 
+  directionToColor, 
+  screenUV, 
+  mix, 
+  mrt, 
+  Fn 
+} from 'three/tsl';
+```
+
+### Import Breakdown
+
+| Import | Purpose |
+|--------|---------|
+| `output` | Built-in node representing the final shaded output |
+| `normalView` | View-space normal vector |
+| `diffuseColor` | Base diffuse color from material |
+| `emissive` | Emissive color from material |
+| `directionToColor` | Converts a direction vector (-1 to 1) to color space (0 to 1) |
+| `pass` | Creates a render pass for post-processing |
+| `mrt` | Defines the Multiple Render Target configuration |
+| `Fn` | Creates a TSL function node |
+| `screenUV` | Screen-space UV coordinates (0-1) |
+| `mix` | Linear interpolation between values |
+| `step` | Step function for thresholding |
+
+## Implementation Steps
+
+### 1. Create the Scene Pass with MRT
+
+```javascript
+const scenePass = pass(scene, camera, { 
+  minFilter: THREE.NearestFilter, 
+  magFilter: THREE.NearestFilter 
+});
+
+scenePass.setMRT(mrt({
+  output: output,
+  normal: directionToColor(normalView),
+  diffuse: diffuseColor,
+  emissive: emissive
+}));
+```
+
+**Key Points:**
+- Use `NearestFilter` for pixel-perfect sampling (no interpolation artifacts)
+- `mrt()` takes an object where keys are texture names and values are TSL nodes
+- `directionToColor(normalView)` remaps normals from [-1,1] to [0,1] for storage
+
+### 2. Configure Texture Types (Optimization)
+
+```javascript
+const normalTexture = scenePass.getTexture('normal');
+const diffuseTexture = scenePass.getTexture('diffuse');
+const emissiveTexture = scenePass.getTexture('emissive');
+
+normalTexture.type = THREE.UnsignedByteType;
+diffuseTexture.type = THREE.UnsignedByteType;
+emissiveTexture.type = THREE.UnsignedByteType;
+```
+
+**Why:** By default, textures use `HalfFloatType` (16-bit). For data that doesn't need HDR precision (normals, diffuse colors), `UnsignedByteType` (8-bit) saves GPU memory and bandwidth.
+
+### 3. Create Post-Processing with MRT Textures
+
+```javascript
+postProcessing = new THREE.PostProcessing(renderer);
+postProcessing.outputColorTransform = false;
+
+postProcessing.outputNode = Fn(() => {
+  const output = scenePass.getTextureNode('output');
+  const normal = scenePass.getTextureNode('normal');
+  const diffuse = scenePass.getTextureNode('diffuse');
+  const emissive = scenePass.getTextureNode('emissive');
+
+  // Compose the final output using the MRT textures
+  // ... your compositing logic here
+  
+  return finalOutput;
+})();
+```
+
+**Key Points:**
+- `getTextureNode()` retrieves a TSL node for sampling the MRT texture
+- `outputColorTransform = false` disables automatic color space conversion (you handle it manually)
+- Use `output.renderOutput()` when you need tone mapping and color space conversion applied
+
+### 4. Render Loop
+
+```javascript
+function render() {
+  postProcessing.render();
+}
+
+renderer.setAnimationLoop(render);
+```
+
+## Complete Minimal Example
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { output, normalView, diffuseColor, emissive, directionToColor, pass, mrt, Fn } from 'three/tsl';
+
+// Setup scene, camera, renderer...
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.25, 20);
+
+// Create MRT pass
+const scenePass = pass(scene, camera, { 
+  minFilter: THREE.NearestFilter, 
+  magFilter: THREE.NearestFilter 
+});
+
+scenePass.setMRT(mrt({
+  output: output,
+  normal: directionToColor(normalView),
+  diffuse: diffuseColor,
+  emissive: emissive
+}));
+
+// Optimize texture types
+scenePass.getTexture('normal').type = THREE.UnsignedByteType;
+scenePass.getTexture('diffuse').type = THREE.UnsignedByteType;
+scenePass.getTexture('emissive').type = THREE.UnsignedByteType;
+
+// Setup post-processing
+const postProcessing = new THREE.PostProcessing(renderer);
+postProcessing.outputColorTransform = false;
+
+postProcessing.outputNode = Fn(() => {
+  const outputTex = scenePass.getTextureNode('output');
+  // Apply tone mapping and color space conversion
+  return outputTex.renderOutput();
+})();
+
+// Render
+renderer.setAnimationLoop(() => postProcessing.render());
+```
+
+## Common Use Cases
+
+### Deferred Shading
+Use MRT to output geometry data (position, normals, albedo, material properties) and perform lighting calculations in a separate pass.
+
+### Debug Visualization
+Display different buffers side-by-side for debugging:
+
+```javascript
+postProcessing.outputNode = Fn(() => {
+  const output = scenePass.getTextureNode('output');
+  const normal = scenePass.getTextureNode('normal');
+  
+  // Split screen: left = output, right = normals
+  return mix(output.renderOutput(), normal, step(0.5, screenUV.x));
+})();
+```
+
+### Selective Post-Processing
+Apply effects only to specific parts using the diffuse or emissive buffers as masks.
+
+## API Reference
+
+### `pass(scene, camera, options)`
+Creates a render pass.
+- `options.minFilter` / `options.magFilter`: Texture filtering mode
+
+### `scenePass.setMRT(mrtConfig)`
+Configures multiple render targets.
+- `mrtConfig`: Object from `mrt()` function
+
+### `mrt({ name: node, ... })`
+Defines MRT output mapping.
+- Keys: Texture names (strings)
+- Values: TSL nodes representing the data to write
+
+### `scenePass.getTexture(name)`
+Returns the `THREE.Texture` for the named MRT output. Use for configuration.
+
+### `scenePass.getTextureNode(name)`
+Returns a TSL node for sampling the named MRT texture in shaders.
+
+### `textureNode.renderOutput()`
+Applies tone mapping and output color space conversion to the texture.
+
+## Performance Considerations
+
+1. **Texture Type Optimization**: Use `UnsignedByteType` for non-HDR data
+2. **MRT Count**: More targets = more memory bandwidth; keep it minimal
+3. **Filter Mode**: Use `NearestFilter` unless you specifically need interpolation
+4. **Resolution**: Consider rendering MRT at lower resolution if full-res isn't needed
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Washed out colors | Use `output.renderOutput()` for proper tone mapping |
+| Banding in normals | Ensure `directionToColor()` is applied before storage |
+| Black textures | Check that scene has objects and lighting |
+| Memory issues | Reduce texture types to `UnsignedByteType` where possible |
+

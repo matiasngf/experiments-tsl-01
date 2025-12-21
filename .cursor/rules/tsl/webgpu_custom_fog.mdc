@@ -1,0 +1,207 @@
+---
+description: Custom procedural fog effect using Three.js WebGPU and TSL.
+alwaysApply: false
+---
+
+# Custom Fog Effect with Three.js WebGPU and TSL
+
+This recipe demonstrates how to implement a custom procedural fog effect using Three.js WebGPU renderer and TSL (Three Shading Language).
+
+## Overview
+
+The effect creates a dynamic, noise-based ground fog that:
+- Fades based on camera distance
+- Uses animated 3D noise for organic movement
+- Blends with a sky-to-ground gradient background
+- Creates atmospheric depth for urban/architectural scenes
+
+## Prerequisites
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { 
+  color, 
+  fog, 
+  float, 
+  positionWorld, 
+  triNoise3D, 
+  positionView, 
+  normalWorld, 
+  uniform 
+} from 'three/tsl';
+```
+
+## Implementation Steps
+
+### 1. Define Base Colors
+
+```javascript
+const skyColor = color( 0xf0f5f5 );
+const groundColor = color( 0xd0dee7 );
+```
+
+### 2. Calculate Fog Distance Factor
+
+Use `positionView.z` (negative in front of camera) to create a smooth distance-based falloff:
+
+```javascript
+const fogNoiseDistance = positionView.z.negate().smoothstep( 0, camera.far - 300 );
+```
+
+- `positionView.z.negate()` - Converts negative view-space Z to positive distance
+- `.smoothstep( 0, camera.far - 300 )` - Creates smooth 0-1 transition from near to far
+
+### 3. Create Ground Fog Area Mask
+
+Calculate a height-based fog density that increases near the ground:
+
+```javascript
+const distance = fogNoiseDistance.mul( 20 ).max( 4 );
+const alpha = 0.98;
+const groundFogArea = float( distance )
+  .sub( positionWorld.y )
+  .div( distance )
+  .pow( 3 )
+  .saturate()
+  .mul( alpha );
+```
+
+**Breakdown:**
+- `distance` - Fog thickness varies with camera distance (min 4 units, max 20 units)
+- `positionWorld.y` - World-space height of the fragment
+- `.pow( 3 )` - Creates exponential falloff for more natural fog density
+- `.saturate()` - Clamps result to 0-1 range
+- `.mul( alpha )` - Controls maximum fog opacity
+
+### 4. Create Animated Noise Timer
+
+```javascript
+const timer = uniform( 0 ).onFrameUpdate( ( frame ) => frame.time );
+```
+
+This creates a uniform that automatically updates with elapsed time each frame.
+
+### 5. Generate Layered 3D Noise
+
+Combine two noise layers at different scales for organic movement:
+
+```javascript
+const fogNoiseA = triNoise3D( positionWorld.mul( 0.005 ), 0.2, timer );
+const fogNoiseB = triNoise3D( positionWorld.mul( 0.01 ), 0.2, timer.mul( 1.2 ) );
+
+const fogNoise = fogNoiseA.add( fogNoiseB ).mul( groundColor );
+```
+
+**`triNoise3D` Parameters:**
+1. `position` - 3D sample coordinates (scaled world position)
+2. `roughness` - Noise roughness/detail level
+3. `time` - Animation offset
+
+**Layering Strategy:**
+- `fogNoiseA` - Large-scale noise (0.005 frequency)
+- `fogNoiseB` - Smaller-scale detail (0.01 frequency, 1.2x faster animation)
+
+### 6. Apply Custom Fog to Scene
+
+```javascript
+scene.fogNode = fog( 
+  fogNoiseDistance.oneMinus().mix( groundColor, fogNoise ), 
+  groundFogArea 
+);
+```
+
+The `fog()` function takes:
+1. **Fog color** - Blends from solid `groundColor` (near) to noisy fog (far)
+2. **Fog factor** - The `groundFogArea` height-based mask
+
+### 7. Apply Custom Background
+
+```javascript
+scene.backgroundNode = normalWorld.y.max( 0 ).mix( groundColor, skyColor );
+```
+
+Creates a gradient from `groundColor` (horizon) to `skyColor` (zenith) based on surface normal Y component.
+
+## Complete Fog Setup Code
+
+```javascript
+// Colors
+const skyColor = color( 0xf0f5f5 );
+const groundColor = color( 0xd0dee7 );
+
+// Distance-based fog factor
+const fogNoiseDistance = positionView.z.negate().smoothstep( 0, camera.far - 300 );
+
+// Height-based ground fog mask
+const distance = fogNoiseDistance.mul( 20 ).max( 4 );
+const alpha = 0.98;
+const groundFogArea = float( distance )
+  .sub( positionWorld.y )
+  .div( distance )
+  .pow( 3 )
+  .saturate()
+  .mul( alpha );
+
+// Animated timer
+const timer = uniform( 0 ).onFrameUpdate( ( frame ) => frame.time );
+
+// Layered noise
+const fogNoiseA = triNoise3D( positionWorld.mul( 0.005 ), 0.2, timer );
+const fogNoiseB = triNoise3D( positionWorld.mul( 0.01 ), 0.2, timer.mul( 1.2 ) );
+const fogNoise = fogNoiseA.add( fogNoiseB ).mul( groundColor );
+
+// Apply to scene
+scene.fogNode = fog( fogNoiseDistance.oneMinus().mix( groundColor, fogNoise ), groundFogArea );
+scene.backgroundNode = normalWorld.y.max( 0 ).mix( groundColor, skyColor );
+```
+
+## Key TSL Concepts Used
+
+| Function | Purpose |
+|----------|---------|
+| `color()` | Creates a color node from hex value |
+| `float()` | Creates a float node |
+| `uniform()` | Creates a uniform variable (updateable from JS) |
+| `positionWorld` | Fragment's world-space position |
+| `positionView` | Fragment's view-space position |
+| `normalWorld` | Fragment's world-space normal |
+| `triNoise3D()` | 3D triangular noise function |
+| `fog()` | Creates fog node with color and factor |
+| `.smoothstep()` | Hermite interpolation between edges |
+| `.mix()` | Linear interpolation between two values |
+| `.saturate()` | Clamps to 0-1 range |
+| `.oneMinus()` | Returns `1 - value` |
+| `.onFrameUpdate()` | Callback to update uniform each frame |
+
+## Customization Options
+
+### Fog Density
+Adjust the `.pow( 3 )` exponent - higher values create sharper fog edges.
+
+### Fog Height
+Modify the `distance` calculation to control fog thickness.
+
+### Noise Scale
+Change `positionWorld.mul( 0.005 )` multipliers for larger/smaller noise patterns.
+
+### Animation Speed
+Adjust `timer.mul( 1.2 )` multipliers for faster/slower fog movement.
+
+### Colors
+Replace `skyColor` and `groundColor` with any colors for different atmospheres.
+
+## Renderer Requirements
+
+This effect requires the WebGPU renderer:
+
+```javascript
+renderer = new THREE.WebGPURenderer( { antialias: true } );
+```
+
+## Notes
+
+- The fog is applied globally via `scene.fogNode`
+- All materials in the scene will automatically receive the fog effect
+- The background is independent and set via `scene.backgroundNode`
+- Performance is GPU-bound; the noise calculations run entirely on the GPU
+

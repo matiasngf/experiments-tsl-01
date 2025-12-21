@@ -1,0 +1,619 @@
+---
+description: Interactive height-field water surface simulation with WebGPU compute shaders.
+alwaysApply: false
+---
+
+# WebGPU Compute Water Simulation
+
+This recipe explains how to implement an interactive water surface simulation using Three.js WebGPU compute shaders. The simulation features:
+
+- **Height-field water simulation** using wave propagation equations
+- **Ping-pong buffer technique** for GPU-side state management
+- **Mouse interaction** to create ripples
+- **Floating objects** (ducks) that respond to water dynamics
+- **Dynamic normal calculation** for realistic lighting
+
+---
+
+## Table of Contents
+
+1. [Core Concepts](#core-concepts)
+2. [Required Imports](#required-imports)
+3. [Simulation Constants](#simulation-constants)
+4. [Data Structures](#data-structures)
+5. [Height Field Simulation](#height-field-simulation)
+6. [Ping-Pong Buffer Pattern](#ping-pong-buffer-pattern)
+7. [Water Material with Custom Shaders](#water-material-with-custom-shaders)
+8. [Floating Objects Physics](#floating-objects-physics)
+9. [Mouse Interaction](#mouse-interaction)
+10. [Render Loop](#render-loop)
+11. [Complete Implementation Checklist](#complete-implementation-checklist)
+
+---
+
+## Core Concepts
+
+### Height-Field Water Simulation
+
+The water surface is represented as a 2D grid where each cell stores a height value. Wave propagation is simulated by:
+
+1. Averaging neighbor heights (north, south, east, west)
+2. Subtracting the previous frame's height
+3. Applying viscosity damping
+
+**Wave equation (simplified):**
+```
+newHeight = (avgNeighbors * 0.5 - prevHeight) * viscosity
+```
+
+### Ping-Pong Buffering
+
+Since compute shaders cannot read and write to the same buffer simultaneously, we use two buffers:
+- Frame N: Read from A, Write to B
+- Frame N+1: Read from B, Write to A
+
+---
+
+## Required Imports
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { 
+    instanceIndex,      // Current compute invocation index
+    struct,             // Define structured data types
+    If,                 // Conditional branching in TSL
+    uint, int, float,   // Type casting
+    floor, clamp, min, max, length, cos,  // Math operations
+    vec2, vec3,         // Vector constructors
+    vertexIndex,        // Current vertex in vertex shader
+    Fn,                 // Function wrapper for TSL
+    uniform,            // Uniform values
+    instancedArray,     // GPU storage buffer
+    positionLocal,      // Local vertex position
+    transformNormalToView,  // Normal transformation
+    select,             // Conditional selection (ternary)
+    globalId            // 2D/3D compute dispatch ID
+} from 'three/tsl';
+```
+
+---
+
+## Simulation Constants
+
+```javascript
+// Grid resolution - higher = more detail, more compute cost
+const WIDTH = 128;
+
+// Physical size of water surface in world units
+const BOUNDS = 6;
+const BOUNDS_HALF = BOUNDS * 0.5;
+
+// Boundary limit for floating objects
+const limit = BOUNDS_HALF - 0.2;
+
+// Maximum initial wave height
+const waterMaxHeight = 0.1;
+
+// Number of floating objects
+const NUM_DUCKS = 100;
+```
+
+---
+
+## Data Structures
+
+### Height Storage Buffers
+
+Three buffers are needed for the simulation:
+
+```javascript
+// Current heights (ping buffer)
+const heightStorageA = instancedArray( heightArray ).setName( 'HeightA' );
+
+// Current heights (pong buffer)
+const heightStorageB = instancedArray( new Float32Array( heightArray ) ).setName( 'HeightB' );
+
+// Previous frame heights (for wave equation)
+const prevHeightStorage = instancedArray( prevHeightArray ).setName( 'PrevHeight' );
+```
+
+### Initial Height Data (Optional Noise)
+
+```javascript
+const heightArray = new Float32Array( WIDTH * WIDTH );
+const prevHeightArray = new Float32Array( WIDTH * WIDTH );
+
+let p = 0;
+for ( let j = 0; j < WIDTH; j++ ) {
+    for ( let i = 0; i < WIDTH; i++ ) {
+        const height = noise( i, j ); // Your noise function or 0
+        heightArray[ p ] = height;
+        prevHeightArray[ p ] = height;
+        p++;
+    }
+}
+```
+
+### Floating Object Data Structure
+
+Use `struct` for organized instance data:
+
+```javascript
+const DuckStruct = struct( {
+    position: 'vec3',
+    velocity: 'vec2'   // Only XZ movement, Y follows water
+} );
+
+// Stride must be multiple of 4 floats for GPU alignment
+// vec3 (3) + vec2 (2) + padding (3) = 8 floats
+const duckStride = 8;
+const duckInstanceDataArray = new Float32Array( NUM_DUCKS * duckStride );
+
+// Initialize positions
+for ( let i = 0; i < NUM_DUCKS; i++ ) {
+    duckInstanceDataArray[ i * duckStride + 0 ] = ( Math.random() - 0.5 ) * BOUNDS * 0.7;  // x
+    duckInstanceDataArray[ i * duckStride + 1 ] = 0;  // y (will be set by compute)
+    duckInstanceDataArray[ i * duckStride + 2 ] = ( Math.random() - 0.5 ) * BOUNDS * 0.7;  // z
+}
+
+const duckInstanceDataStorage = instancedArray( duckInstanceDataArray, DuckStruct );
+```
+
+---
+
+## Height Field Simulation
+
+### Getting Neighbor Indices
+
+Convert 1D buffer index to 2D grid coordinates and find neighbors:
+
+```javascript
+const getNeighborIndicesTSL = ( index ) => {
+    const width = uint( WIDTH );
+    
+    // Convert 1D index to 2D coordinates
+    const x = int( index.mod( WIDTH ) );
+    const y = int( index.div( WIDTH ) );
+    
+    // Clamp to edges (emulates texture wrap mode)
+    const leftX = max( 0, x.sub( 1 ) );
+    const rightX = min( x.add( 1 ), width.sub( 1 ) );
+    const bottomY = max( 0, y.sub( 1 ) );
+    const topY = min( y.add( 1 ), width.sub( 1 ) );
+    
+    // Calculate 1D indices for neighbors
+    const westIndex = y.mul( width ).add( leftX );
+    const eastIndex = y.mul( width ).add( rightX );
+    const southIndex = bottomY.mul( width ).add( x );
+    const northIndex = topY.mul( width ).add( x );
+    
+    return { northIndex, southIndex, eastIndex, westIndex };
+};
+```
+
+### Getting Neighbor Values
+
+```javascript
+const getNeighborValuesTSL = ( index, store ) => {
+    const { northIndex, southIndex, eastIndex, westIndex } = getNeighborIndicesTSL( index );
+    
+    return {
+        north: store.element( northIndex ),
+        south: store.element( southIndex ),
+        east: store.element( eastIndex ),
+        west: store.element( westIndex )
+    };
+};
+```
+
+### Height Compute Shader
+
+```javascript
+const createComputeHeight = ( readBuffer, writeBuffer ) => Fn( () => {
+    
+    // Uniforms for mouse interaction
+    const { viscosity, mousePos, mouseSize, mouseDeep, mouseSpeed } = effectController;
+    
+    // Read current and previous heights
+    const height = readBuffer.element( instanceIndex ).toVar();
+    const prevHeight = prevHeightStorage.element( instanceIndex ).toVar();
+    
+    // Get neighbor heights
+    const { north, south, east, west } = getNeighborValuesTSL( instanceIndex, readBuffer );
+    
+    // Wave propagation equation
+    const neighborHeight = north.add( south ).add( east ).add( west );
+    neighborHeight.mulAssign( 0.5 );           // Average * 2 / 4 = 0.5
+    neighborHeight.subAssign( prevHeight );     // Subtract previous
+    const newHeight = neighborHeight.mul( viscosity );  // Apply damping
+    
+    // Calculate grid position (0-1 range)
+    const x = float( globalId.x ).mul( 1 / WIDTH );
+    const y = float( globalId.y ).mul( 1 / WIDTH );
+    
+    // Mouse influence - cosine falloff from mouse position
+    const centerVec = vec2( 0.5 );
+    const mousePhase = clamp(
+        length( vec2( x, y ).sub( centerVec ).mul( BOUNDS ).sub( mousePos ) )
+            .mul( Math.PI ).div( mouseSize ),
+        0.0,
+        Math.PI
+    );
+    
+    // Add mouse disturbance (cosine gives smooth circular ripple)
+    newHeight.addAssign(
+        cos( mousePhase ).add( 1.0 ).mul( mouseDeep ).mul( mouseSpeed.length() )
+    );
+    
+    // Store current as previous for next frame
+    prevHeightStorage.element( instanceIndex ).assign( height );
+    
+    // Write new height
+    writeBuffer.element( instanceIndex ).assign( newHeight );
+    
+} )().compute( WIDTH * WIDTH, [ 16, 16 ] );  // Dispatch with workgroup size
+```
+
+---
+
+## Ping-Pong Buffer Pattern
+
+### Creating Both Compute Shaders
+
+```javascript
+const computeHeightAtoB = createComputeHeight( heightStorageA, heightStorageB );
+const computeHeightBtoA = createComputeHeight( heightStorageB, heightStorageA );
+
+// Track which buffer to read from in material shaders
+const readFromA = uniform( 1 );
+let pingPong = 0;
+```
+
+### Executing in Render Loop
+
+```javascript
+if ( pingPong === 0 ) {
+    renderer.compute( computeHeightAtoB );
+    readFromA.value = 0;  // Material reads from B (just written)
+} else {
+    renderer.compute( computeHeightBtoA );
+    readFromA.value = 1;  // Material reads from A (just written)
+}
+pingPong = 1 - pingPong;
+```
+
+### Reading from Correct Buffer
+
+```javascript
+const getCurrentHeight = ( index ) => {
+    return select( readFromA, 
+        heightStorageA.element( index ), 
+        heightStorageB.element( index ) 
+    );
+};
+```
+
+---
+
+## Water Material with Custom Shaders
+
+### Geometry Setup
+
+```javascript
+// Grid resolution matches compute grid
+const waterGeometry = new THREE.PlaneGeometry( BOUNDS, BOUNDS, WIDTH - 1, WIDTH - 1 );
+
+const waterMaterial = new THREE.MeshStandardNodeMaterial( {
+    color: 0x9bd2ec,
+    metalness: 0.9,
+    roughness: 0,
+    transparent: true,
+    opacity: 0.8,
+    side: THREE.DoubleSide
+} );
+
+const waterMesh = new THREE.Mesh( waterGeometry, waterMaterial );
+waterMesh.rotation.x = - Math.PI * 0.5;  // Lay flat
+```
+
+### Custom Position Node (Vertex Displacement)
+
+```javascript
+waterMaterial.positionNode = Fn( () => {
+    // Offset Z (becomes Y after rotation) by water height
+    return vec3( 
+        positionLocal.x, 
+        positionLocal.y, 
+        getCurrentHeight( vertexIndex ) 
+    );
+} )();
+```
+
+### Custom Normal Node (Dynamic Lighting)
+
+Calculate normals from height differences:
+
+```javascript
+const getCurrentNormals = ( index ) => {
+    const { northIndex, southIndex, eastIndex, westIndex } = getNeighborIndicesTSL( index );
+    
+    const north = getCurrentHeight( northIndex );
+    const south = getCurrentHeight( southIndex );
+    const east = getCurrentHeight( eastIndex );
+    const west = getCurrentHeight( westIndex );
+    
+    // Gradient gives surface slope
+    const normalX = west.sub( east ).mul( WIDTH / BOUNDS );
+    const normalY = south.sub( north ).mul( WIDTH / BOUNDS );
+    
+    return { normalX, normalY };
+};
+
+waterMaterial.normalNode = Fn( () => {
+    const { normalX, normalY } = getCurrentNormals( vertexIndex );
+    
+    // Transform to view space, negate Y for correct orientation
+    return transformNormalToView( 
+        vec3( normalX, normalY.negate(), 1.0 ) 
+    ).toVertexStage();
+} )();
+```
+
+---
+
+## Floating Objects Physics
+
+### Compute Shader for Floating Objects
+
+```javascript
+const computeDucks = Fn( () => {
+    // Physics constants
+    const yOffset = float( -0.04 );           // How deep objects sit in water
+    const verticalResponseFactor = float( 0.98 );  // Vertical smoothing
+    const waterPushFactor = float( 0.015 );   // How much waves push objects
+    const linearDamping = float( 0.92 );      // Velocity decay
+    const bounceDamping = float( -0.4 );      // Bounce off walls
+    
+    // Get current instance data
+    const instancePosition = duckInstanceDataStorage.element( instanceIndex )
+        .get( 'position' ).toVar();
+    const velocity = duckInstanceDataStorage.element( instanceIndex )
+        .get( 'velocity' ).toVar();
+    
+    // Convert world position to grid coordinates
+    const gridCoordX = instancePosition.x.div( BOUNDS ).add( 0.5 ).mul( WIDTH );
+    const gridCoordZ = instancePosition.z.div( BOUNDS ).add( 0.5 ).mul( WIDTH );
+    
+    const xCoord = uint( clamp( floor( gridCoordX ), 0, WIDTH - 1 ) );
+    const zCoord = uint( clamp( floor( gridCoordZ ), 0, WIDTH - 1 ) );
+    const heightIndex = zCoord.mul( WIDTH ).add( xCoord );
+    
+    // Sample water height and normals at object position
+    const waterHeight = getCurrentHeight( heightIndex );
+    const { normalX, normalY } = getCurrentNormals( heightIndex );
+    
+    // Vertical positioning - smoothly follow water surface
+    const targetY = waterHeight.add( yOffset );
+    const deltaY = targetY.sub( instancePosition.y );
+    instancePosition.y.addAssign( deltaY.mul( verticalResponseFactor ) );
+    
+    // Horizontal movement - pushed by water slope
+    velocity.x.mulAssign( linearDamping );
+    velocity.y.mulAssign( linearDamping );
+    velocity.x.addAssign( normalX.mul( waterPushFactor ) );
+    velocity.y.addAssign( normalY.mul( waterPushFactor ) );
+    
+    instancePosition.x.addAssign( velocity.x );
+    instancePosition.z.addAssign( velocity.y );
+    
+    // Boundary collision with bounce
+    If( instancePosition.x.lessThan( -limit ), () => {
+        instancePosition.x = -limit;
+        velocity.x.mulAssign( bounceDamping );
+    } ).ElseIf( instancePosition.x.greaterThan( limit ), () => {
+        instancePosition.x = limit;
+        velocity.x.mulAssign( bounceDamping );
+    } );
+    
+    If( instancePosition.z.lessThan( -limit ), () => {
+        instancePosition.z = -limit;
+        velocity.y.mulAssign( bounceDamping );
+    } ).ElseIf( instancePosition.z.greaterThan( limit ), () => {
+        instancePosition.z = limit;
+        velocity.y.mulAssign( bounceDamping );
+    } );
+    
+    // Write back updated values
+    duckInstanceDataStorage.element( instanceIndex ).get( 'position' ).assign( instancePosition );
+    duckInstanceDataStorage.element( instanceIndex ).get( 'velocity' ).assign( velocity );
+    
+} )().compute( NUM_DUCKS );
+```
+
+### Instanced Mesh Position Node
+
+```javascript
+duckModel.material.positionNode = Fn( () => {
+    const instancePosition = duckInstanceDataStorage.element( instanceIndex )
+        .get( 'position' );
+    return positionLocal.add( instancePosition );
+} )();
+
+const duckMesh = new THREE.InstancedMesh( duckModel.geometry, duckModel.material, NUM_DUCKS );
+```
+
+---
+
+## Mouse Interaction
+
+### Uniforms
+
+```javascript
+const effectController = {
+    mousePos: uniform( new THREE.Vector2() ),
+    mouseSpeed: uniform( new THREE.Vector2() ),
+    mouseDeep: uniform( 0.5 ),      // How deep mouse pushes water
+    mouseSize: uniform( 0.12 ),     // Radius of mouse effect
+    viscosity: uniform( 0.96 ),     // Wave damping (0.9-0.99)
+};
+```
+
+### Raycasting for Mouse Position
+
+```javascript
+// Invisible plane for raycasting
+const meshRay = new THREE.Mesh(
+    new THREE.PlaneGeometry( BOUNDS, BOUNDS, 1, 1 ),
+    new THREE.MeshBasicMaterial( { visible: false } )
+);
+meshRay.rotation.x = - Math.PI / 2;
+
+// In animation loop or pointer event:
+raycaster.setFromCamera( mouseCoords, camera );
+const intersects = raycaster.intersectObject( meshRay );
+
+if ( intersects.length > 0 ) {
+    const point = intersects[ 0 ].point;
+    
+    // Calculate speed from position delta
+    effectController.mouseSpeed.value.set(
+        point.x - effectController.mousePos.value.x,
+        point.z - effectController.mousePos.value.y
+    );
+    
+    effectController.mousePos.value.set( point.x, point.z );
+}
+```
+
+---
+
+## Render Loop
+
+```javascript
+let frame = 0;
+
+function render() {
+    raycast();  // Update mouse uniforms
+    
+    frame++;
+    
+    // Control simulation speed (skip frames)
+    if ( frame >= 7 - effectController.speed ) {
+        
+        // Ping-pong compute
+        if ( pingPong === 0 ) {
+            renderer.compute( computeHeightAtoB );
+            readFromA.value = 0;
+        } else {
+            renderer.compute( computeHeightBtoA );
+            readFromA.value = 1;
+        }
+        pingPong = 1 - pingPong;
+        
+        // Update floating objects
+        renderer.compute( computeDucks );
+        
+        frame = 0;
+    }
+    
+    renderer.render( scene, camera );
+}
+
+renderer.setAnimationLoop( render );
+```
+
+---
+
+## Complete Implementation Checklist
+
+### Setup Phase
+
+- [ ] Import THREE from `three/webgpu` and TSL functions from `three/tsl`
+- [ ] Define simulation constants (WIDTH, BOUNDS, etc.)
+- [ ] Create WebGPURenderer
+- [ ] Check WebGPU availability
+
+### Data Initialization
+
+- [ ] Create height arrays (initial + previous)
+- [ ] Create `instancedArray` storage buffers (A, B, prev)
+- [ ] Define struct for floating objects if needed
+- [ ] Create floating object instance data storage
+
+### Compute Shaders
+
+- [ ] Implement `getNeighborIndicesTSL()` helper
+- [ ] Implement `getNeighborValuesTSL()` helper
+- [ ] Create `getCurrentHeight()` helper with `select()` for ping-pong
+- [ ] Create `getCurrentNormals()` helper
+- [ ] Build height simulation compute shader
+- [ ] Create both ping-pong variants (A→B, B→A)
+- [ ] Build floating object compute shader (if applicable)
+
+### Water Mesh
+
+- [ ] Create PlaneGeometry with (WIDTH - 1) segments
+- [ ] Create MeshStandardNodeMaterial
+- [ ] Set `positionNode` for vertex displacement
+- [ ] Set `normalNode` for dynamic lighting
+- [ ] Rotate mesh to horizontal orientation
+
+### Interaction
+
+- [ ] Create invisible raycast plane
+- [ ] Set up pointer event listeners
+- [ ] Implement raycasting to get world position
+- [ ] Calculate and update mouse speed uniform
+
+### Render Loop
+
+- [ ] Track frame counter for simulation speed control
+- [ ] Alternate ping-pong compute dispatches
+- [ ] Update `readFromA` uniform after each compute
+- [ ] Dispatch floating object compute if enabled
+- [ ] Call `renderer.render()`
+
+---
+
+## Key Formulas Reference
+
+### Wave Propagation
+```
+newHeight = ((north + south + east + west) * 0.5 - prevHeight) * viscosity
+```
+
+### Normal Calculation
+```
+normalX = (westHeight - eastHeight) * (WIDTH / BOUNDS)
+normalY = (southHeight - northHeight) * (WIDTH / BOUNDS)
+normal = normalize(vec3(normalX, normalY, 1.0))
+```
+
+### World to Grid Coordinate
+```
+gridX = (worldX / BOUNDS + 0.5) * WIDTH
+gridZ = (worldZ / BOUNDS + 0.5) * WIDTH
+index = floor(gridZ) * WIDTH + floor(gridX)
+```
+
+### Mouse Influence (Cosine Falloff)
+```
+distance = length(gridPos - mousePos)
+phase = clamp(distance * PI / mouseSize, 0, PI)
+influence = (cos(phase) + 1) * mouseDeep * mouseSpeed
+```
+
+---
+
+## Performance Considerations
+
+1. **Grid Resolution**: WIDTH of 128 is a good balance. Higher values increase compute cost quadratically.
+
+2. **Workgroup Size**: Use `[16, 16]` for the height compute (256 threads per workgroup).
+
+3. **Frame Skipping**: Control simulation speed by skipping frames rather than reducing iterations.
+
+4. **Buffer Alignment**: Struct arrays must have strides that are multiples of 4 floats.
+
+5. **Viscosity Range**: Keep between 0.9 and 0.99. Lower values = faster decay, higher = longer waves.
+

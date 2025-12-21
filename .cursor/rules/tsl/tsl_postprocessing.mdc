@@ -1,0 +1,603 @@
+---
+description: TSL postprocessing with WebGPURenderer including all available effects and best practices.
+alwaysApply: false
+---
+
+# TSL Postprocessing with React
+
+This guide covers how to use Three.js TSL (Three.js Shading Language) postprocessing with WebGPURenderer, including all available effects and best practices with a focus on performance.
+
+## Table of Contents
+
+1. [TSL Postprocessing Basics](#tsl-postprocessing-basics)
+2. [Pre-made Effect Passes](#pre-made-effect-passes)
+3. [Writing Custom Passes](#writing-custom-passes)
+4. [React Integration Patterns](#react-integration-patterns)
+5. [Advanced Topics](#advanced-topics)
+
+---
+
+## TSL Postprocessing Basics
+
+The TSL postprocessing system is built on a node-based architecture where effects are chained together as nodes. The core components are:
+
+- **`PostProcessing`** - Main controller that manages the effect chain
+- **`pass(scene, camera)`** - Creates a render pass that renders your scene to a texture
+- **Effect nodes** - Transform the texture output (bloom, blur, anti-aliasing, etc.)
+- **`outputNode`** - The final node in the chain that gets rendered to screen
+
+### Minimal Example
+
+```js
+import * as THREE from "three/webgpu";
+import { pass } from "three/tsl";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
+
+// Setup renderer
+const renderer = new THREE.WebGPURenderer();
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+// Create scene and camera
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(
+  75,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000
+);
+
+// Setup postprocessing
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// Create render pass
+const scenePass = pass(scene, camera);
+const scenePassColor = scenePass.getTextureNode("output");
+
+// Add bloom effect
+const bloomPass = bloom(scenePassColor);
+
+// Combine original scene with bloom
+postProcessing.outputNode = scenePassColor.add(bloomPass);
+
+// Animation loop - use postProcessing.render() instead of renderer.render()
+function animate() {
+  requestAnimationFrame(animate);
+  postProcessing.render();
+}
+animate();
+```
+
+### Key Concepts
+
+1. **Node Chaining**: Effects are connected as a graph. Each effect receives input from the previous node and outputs to the next.
+
+2. **Uniforms for Parameters**: Effect parameters are wrapped in `uniform()`. This is critical for React - you can update `.value` without recreating the pass.
+
+3. **`postProcessing.render()`**: Replaces `renderer.render(scene, camera)` when using postprocessing.
+
+4. **`postProcessing.needsUpdate = true`**: Set this when changing the node graph structure (adding/removing effects), but NOT when updating uniform values.
+
+---
+
+## Pre-made Effect Passes
+
+Three.js provides many ready-to-use postprocessing effects in `examples/jsm/tsl/display/`. Here's a complete reference:
+
+### Anti-Aliasing
+
+| Effect | Import Path                                | Description                                                                     |
+| ------ | ------------------------------------------ | ------------------------------------------------------------------------------- |
+| `fxaa` | `three/addons/tsl/display/FXAANode.js`     | Fast approximate anti-aliasing. Requires sRGB input (apply after tone mapping). |
+| `smaa` | `three/addons/tsl/display/SMAANode.js`     | Subpixel morphological anti-aliasing. Higher quality than FXAA.                 |
+| `ssaa` | `three/addons/tsl/display/SSAAPassNode.js` | Supersampling anti-aliasing. Best quality, highest cost.                        |
+| `traa` | `three/addons/tsl/display/TRAANode.js`     | Temporal anti-aliasing with motion vectors.                                     |
+
+### Blur Effects
+
+| Effect         | Import Path                                    | Description                                    |
+| -------------- | ---------------------------------------------- | ---------------------------------------------- |
+| `gaussianBlur` | `three/addons/tsl/display/GaussianBlurNode.js` | Configurable gaussian blur with sigma control. |
+| `boxBlur`      | `three/addons/tsl/display/boxBlur.js`          | Simple box blur (Fn-based).                    |
+| `hashBlur`     | `three/addons/tsl/display/hashBlur.js`         | Noise-based blur effect.                       |
+| `radialBlur`   | `three/addons/tsl/display/radialBlur.js`       | Radial/zoom blur effect.                       |
+| `motionBlur`   | `three/addons/tsl/display/MotionBlur.js`       | Per-object motion blur using velocity.         |
+
+### Glow & Bloom
+
+| Effect       | Import Path                                  | Description                                                 |
+| ------------ | -------------------------------------------- | ----------------------------------------------------------- |
+| `bloom`      | `three/addons/tsl/display/BloomNode.js`      | Unreal Engine-style bloom with threshold, strength, radius. |
+| `anamorphic` | `three/addons/tsl/display/AnamorphicNode.js` | Anamorphic lens flare/streak effect.                        |
+| `lensflare`  | `three/addons/tsl/display/LensflareNode.js`  | Screen-space lens flare effect.                             |
+
+### Depth-Based Effects
+
+| Effect | Import Path                                    | Description                         |
+| ------ | ---------------------------------------------- | ----------------------------------- |
+| `dof`  | `three/addons/tsl/display/DepthOfFieldNode.js` | Depth of field with bokeh blur.     |
+| `gtao` | `three/addons/tsl/display/GTAONode.js`         | Ground truth ambient occlusion.     |
+| `ssgi` | `three/addons/tsl/display/SSGINode.js`         | Screen-space global illumination.   |
+| `ssr`  | `three/addons/tsl/display/SSRNode.js`          | Screen-space reflections.           |
+| `sss`  | `three/addons/tsl/display/SSSNode.js`          | Screen-space subsurface scattering. |
+
+### Color & Stylization
+
+| Effect                | Import Path                                           | Description                               |
+| --------------------- | ----------------------------------------------------- | ----------------------------------------- |
+| `sepia`               | `three/addons/tsl/display/Sepia.js`                   | Sepia tone filter (simple Fn).            |
+| `dotScreen`           | `three/addons/tsl/display/DotScreenNode.js`           | Halftone dot screen pattern.              |
+| `rgbShift`            | `three/addons/tsl/display/RGBShiftNode.js`            | Chromatic aberration / RGB channel shift. |
+| `chromaticAberration` | `three/addons/tsl/display/ChromaticAberrationNode.js` | Lens chromatic aberration effect.         |
+| `sobel`               | `three/addons/tsl/display/SobelOperatorNode.js`       | Edge detection using Sobel operator.      |
+| `pixelation`          | `three/addons/tsl/display/PixelationPassNode.js`      | Pixelation/low-res effect.                |
+| `bleachBypass`        | `three/addons/tsl/display/BleachBypass.js`            | Film bleach bypass look.                  |
+| `film`                | `three/addons/tsl/display/FilmNode.js`                | Film grain and scanlines.                 |
+| `lut3d`               | `three/addons/tsl/display/Lut3DNode.js`               | 3D LUT color grading.                     |
+
+### Temporal & Motion
+
+| Effect       | Import Path                                  | Description                           |
+| ------------ | -------------------------------------------- | ------------------------------------- |
+| `afterImage` | `three/addons/tsl/display/AfterImageNode.js` | Motion persistence / ghosting effect. |
+| `transition` | `three/addons/tsl/display/TransitionNode.js` | Scene transition effects.             |
+
+### Denoising
+
+| Effect    | Import Path                               | Description                 |
+| --------- | ----------------------------------------- | --------------------------- |
+| `denoise` | `three/addons/tsl/display/DenoiseNode.js` | Temporal/spatial denoising. |
+
+### Stereoscopic / VR
+
+| Effect            | Import Path                                           | Description             |
+| ----------------- | ----------------------------------------------------- | ----------------------- |
+| `stereoPass`      | `three/addons/tsl/display/StereoPassNode.js`          | Stereoscopic rendering. |
+| `stereoComposite` | `three/addons/tsl/display/StereoCompositePassNode.js` | Stereo composite pass.  |
+| `anaglyphPass`    | `three/addons/tsl/display/AnaglyphPassNode.js`        | Red-cyan anaglyph 3D.   |
+| `parallaxBarrier` | `three/addons/tsl/display/ParallaxBarrierPassNode.js` | Parallax barrier 3D.    |
+
+### Outline
+
+| Effect    | Import Path                               | Description                      |
+| --------- | ----------------------------------------- | -------------------------------- |
+| `outline` | `three/addons/tsl/display/OutlineNode.js` | Object outline/selection effect. |
+
+### Usage Example with Multiple Effects
+
+```js
+import * as THREE from "three/webgpu";
+import { pass, renderOutput } from "three/tsl";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
+import { fxaa } from "three/addons/tsl/display/FXAANode.js";
+
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// Disable default color transform since FXAA needs sRGB input
+postProcessing.outputColorTransform = false;
+
+const scenePass = pass(scene, camera);
+const scenePassColor = scenePass.getTextureNode("output");
+
+// Add bloom (works in linear space)
+const bloomPass = bloom(scenePassColor, 1, 0, 0.5);
+const withBloom = scenePassColor.add(bloomPass);
+
+// Apply tone mapping and color space conversion
+const outputPass = renderOutput(withBloom);
+
+// Apply FXAA (needs sRGB input)
+const fxaaPass = fxaa(outputPass);
+
+postProcessing.outputNode = fxaaPass;
+```
+
+---
+
+## Writing Custom Passes
+
+There are two patterns for creating custom postprocessing effects:
+
+### Pattern 1: Simple Fn-based Effect
+
+For simple pixel-level transformations, use a TSL `Fn` function. This is the simplest approach:
+
+```js
+import { Fn, vec3, vec4, dot, mix, uniform } from "three/tsl";
+
+// Sepia-style effect
+export const sepia = Fn(([color]) => {
+  const c = vec3(color);
+  return vec4(
+    dot(c, vec3(0.393, 0.769, 0.189)),
+    dot(c, vec3(0.349, 0.686, 0.168)),
+    dot(c, vec3(0.272, 0.534, 0.131)),
+    color.a
+  );
+});
+
+// Usage
+const scenePass = pass(scene, camera);
+postProcessing.outputNode = sepia(scenePass);
+```
+
+**With Parameters (React-friendly)**:
+
+```js
+import { Fn, vec4, mix, uniform } from "three/tsl";
+
+// Create uniform outside Fn for external access
+const intensityUniform = uniform(0.5);
+
+export const tintEffect = Fn(([color, tintColor]) => {
+  return mix(color, tintColor, intensityUniform);
+});
+
+// Later, update without recreating:
+intensityUniform.value = 0.8;
+```
+
+### Pattern 2: TempNode-based Effect
+
+For complex effects that need render targets, multi-pass rendering, or per-frame updates, extend `TempNode`:
+
+```js
+import { TempNode } from "three/webgpu";
+import {
+  nodeObject,
+  Fn,
+  uv,
+  uniform,
+  vec2,
+  vec4,
+  sin,
+  cos,
+  screenSize,
+} from "three/tsl";
+
+class VignetteNode extends TempNode {
+  static get type() {
+    return "VignetteNode";
+  }
+
+  constructor(inputNode, intensity = 0.5, softness = 0.5) {
+    super("vec4");
+
+    this.inputNode = inputNode;
+
+    // KEY: Use uniform() for parameters that may change
+    // This allows updating without shader recompilation
+    this.intensity = uniform(intensity);
+    this.softness = uniform(softness);
+  }
+
+  setup() {
+    const inputNode = this.inputNode;
+
+    const vignette = Fn(() => {
+      const color = inputNode;
+      const coords = uv().sub(0.5).mul(2.0); // -1 to 1
+      const dist = coords.length();
+
+      const vig = smoothstep(
+        this.intensity,
+        this.intensity.sub(this.softness),
+        dist
+      );
+
+      return vec4(color.rgb.mul(vig), color.a);
+    });
+
+    return vignette();
+  }
+}
+
+// TSL helper function
+export const vignette = (node, intensity, softness) =>
+  nodeObject(new VignetteNode(nodeObject(node), intensity, softness));
+
+// Usage
+const vignettePass = vignette(scenePass, 0.8, 0.3);
+postProcessing.outputNode = vignettePass;
+
+// Update parameters (no shader recompilation!)
+vignettePass.intensity.value = 0.6;
+vignettePass.softness.value = 0.4;
+```
+
+### Pattern 3: Multi-Pass Effect with Render Targets
+
+For effects like blur that require multiple render passes:
+
+```js
+import {
+  RenderTarget,
+  NodeMaterial,
+  QuadMesh,
+  TempNode,
+  NodeUpdateType,
+  RendererUtils,
+} from "three/webgpu";
+import {
+  nodeObject,
+  Fn,
+  uv,
+  uniform,
+  texture,
+  passTexture,
+  vec2,
+  vec4,
+} from "three/tsl";
+
+const _quadMesh = new QuadMesh();
+let _rendererState;
+
+class TwoPassBlurNode extends TempNode {
+  static get type() {
+    return "TwoPassBlurNode";
+  }
+
+  constructor(textureNode, radius = 4) {
+    super("vec4");
+
+    this.textureNode = textureNode;
+    this.radius = uniform(radius);
+
+    // Create render targets for horizontal and vertical passes
+    this._horizontalRT = new RenderTarget(1, 1, { depthBuffer: false });
+    this._verticalRT = new RenderTarget(1, 1, { depthBuffer: false });
+
+    // Output texture node
+    this._textureNode = passTexture(this, this._verticalRT.texture);
+
+    // Run updateBefore every frame
+    this.updateBeforeType = NodeUpdateType.FRAME;
+  }
+
+  updateBefore(frame) {
+    const { renderer } = frame;
+
+    // Save renderer state
+    _rendererState = RendererUtils.resetRendererState(renderer, _rendererState);
+
+    const map = this.textureNode.value;
+    this._horizontalRT.setSize(map.image.width, map.image.height);
+    this._verticalRT.setSize(map.image.width, map.image.height);
+
+    // Horizontal pass
+    _quadMesh.material = this._horizontalMaterial;
+    renderer.setRenderTarget(this._horizontalRT);
+    _quadMesh.render(renderer);
+
+    // Vertical pass
+    this._verticalTexture.value = this._horizontalRT.texture;
+    _quadMesh.material = this._verticalMaterial;
+    renderer.setRenderTarget(this._verticalRT);
+    _quadMesh.render(renderer);
+
+    // Restore renderer state
+    RendererUtils.restoreRendererState(renderer, _rendererState);
+  }
+
+  setup(builder) {
+    const textureNode = this.textureNode;
+
+    // Horizontal blur material
+    const horizontalBlur = Fn(() => {
+      // ... blur implementation
+      return textureNode; // simplified
+    });
+
+    this._horizontalMaterial = new NodeMaterial();
+    this._horizontalMaterial.fragmentNode = horizontalBlur();
+
+    // Vertical blur material
+    this._verticalTexture = texture(this._horizontalRT.texture);
+    const verticalBlur = Fn(() => {
+      return this._verticalTexture;
+    });
+
+    this._verticalMaterial = new NodeMaterial();
+    this._verticalMaterial.fragmentNode = verticalBlur();
+
+    return this._textureNode;
+  }
+
+  dispose() {
+    this._horizontalRT.dispose();
+    this._verticalRT.dispose();
+    this._horizontalMaterial?.dispose();
+    this._verticalMaterial?.dispose();
+  }
+}
+```
+
+---
+
+## Advanced Topics
+
+### Multiple Render Targets (MRT)
+
+MRT allows outputting multiple buffers from a single render pass. This is essential for advanced effects like SSR, SSAO, and motion blur:
+
+```js
+import {
+  pass,
+  mrt,
+  output,
+  velocity,
+  directionToColor,
+  normalView,
+  metalness,
+  roughness,
+} from "three/tsl";
+
+const scenePass = pass(scene, camera);
+
+// Configure MRT with multiple outputs
+scenePass.setMRT(
+  mrt({
+    output, // Color output
+    velocity, // Motion vectors for temporal effects
+    // Custom outputs
+    normal: directionToColor(normalView),
+    metalrough: vec2(metalness, roughness),
+  })
+);
+
+// Access different outputs
+const colorTexture = scenePass.getTextureNode("output");
+const velocityTexture = scenePass.getTextureNode("velocity");
+const normalTexture = scenePass.getTextureNode("normal");
+const metalRoughTexture = scenePass.getTextureNode("metalrough");
+const depthTexture = scenePass.getTextureNode("depth");
+
+// Use for SSR
+const ssrPass = ssr(
+  colorTexture,
+  depthTexture,
+  normalTexture,
+  metalRoughTexture,
+  camera
+);
+```
+
+### Color Space and Tone Mapping
+
+By default, `PostProcessing` applies tone mapping and color space conversion automatically. For effects that need sRGB input (like FXAA), you need manual control:
+
+```js
+import { pass, renderOutput } from "three/tsl";
+import { fxaa } from "three/addons/tsl/display/FXAANode.js";
+
+const postProcessing = new PostProcessing(renderer);
+
+// Disable automatic color transform
+postProcessing.outputColorTransform = false;
+
+const scenePass = pass(scene, camera);
+const scenePassColor = scenePass.getTextureNode("output");
+
+// Apply tone mapping and color space conversion manually
+const outputPass = renderOutput(scenePassColor);
+
+// Now apply FXAA (it receives sRGB input)
+const fxaaPass = fxaa(outputPass);
+
+postProcessing.outputNode = fxaaPass;
+```
+
+### Effect Ordering
+
+The order of effects matters. Here's a typical recommended order:
+
+1. **Scene render** (`pass`)
+2. **Depth-based effects** (DOF, SSAO, SSR) - need linear depth
+3. **Bloom** - works in linear space
+4. **Tone mapping** (`renderOutput`) - converts to sRGB
+5. **Anti-aliasing** (FXAA, SMAA) - needs sRGB input
+6. **Film effects** (grain, vignette) - final touches
+
+```js
+postProcessing.outputColorTransform = false;
+
+const scenePass = pass(scene, camera);
+const color = scenePass.getTextureNode("output");
+
+// 1. Depth effects (linear space)
+const dofPass = dof(color, scenePass.getViewZNode() /* ... */);
+
+// 2. Bloom (linear space)
+const bloomPass = bloom(dofPass);
+const withBloom = dofPass.add(bloomPass);
+
+// 3. Tone mapping -> sRGB
+const outputPass = renderOutput(withBloom);
+
+// 4. Anti-aliasing (sRGB space)
+const fxaaPass = fxaa(outputPass);
+
+postProcessing.outputNode = fxaaPass;
+```
+
+### Resource Disposal
+
+Always dispose postprocessing resources to prevent memory leaks:
+
+```jsx
+useEffect(() => {
+  const postProcessing = new PostProcessing(renderer);
+  const bloomPass = bloom(/* ... */);
+
+  return () => {
+    // Dispose effect nodes that have dispose methods
+    bloomPass.dispose?.();
+
+    // Dispose the postprocessing system
+    postProcessing.dispose();
+  };
+}, []);
+```
+
+### Resolution Scaling
+
+Many effects support resolution scaling for performance:
+
+```js
+const scenePass = pass(scene, camera);
+
+// Render at half resolution for performance
+scenePass.setResolutionScale(0.5);
+
+// Blur at quarter resolution
+const blurPass = gaussianBlur(scenePass, 1, 4, {
+  resolutionScale: 0.25,
+});
+```
+
+### Previous Frame Access (Temporal Effects)
+
+For temporal effects that need the previous frame:
+
+```js
+const scenePass = pass(scene, camera);
+
+// Get current and previous frame textures
+const currentFrame = scenePass.getTextureNode("output");
+const previousFrame = scenePass.getPreviousTextureNode("output");
+
+// Use for motion blur, TAA, etc.
+```
+
+### Layers for Selective Rendering
+
+Use layers to control which objects are included in a pass:
+
+```js
+import { Layers } from "three";
+
+const bloomLayer = new Layers();
+bloomLayer.set(1);
+
+const scenePass = pass(scene, camera);
+scenePass.setLayers(bloomLayer);
+
+// Only objects on layer 1 will be rendered in this pass
+```
+
+---
+
+## Summary
+
+Key takeaways for TSL postprocessing with React:
+
+1. **Use `uniform()` for all parameters** - This is the foundation of React performance
+2. **Create nodes once, update uniforms on prop changes** - Avoid recreating the node graph
+3. **Only set `needsUpdate = true` when the graph structure changes** - Not for uniform updates
+4. **Dispose resources on unmount** - Prevent memory leaks
+5. **Mind the effect order** - Especially for color space (linear vs sRGB)
+6. **Use MRT for advanced effects** - Share geometry pass for multiple effects
+
+For the full list of effects and examples, see:
+
+- `examples/jsm/tsl/display/` - All effect implementations
+- `examples/webgpu_postprocessing*.html` - Usage examples

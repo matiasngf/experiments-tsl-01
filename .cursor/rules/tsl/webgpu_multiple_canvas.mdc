@@ -1,0 +1,332 @@
+---
+description: Rendering multiple independent scenes to separate canvas elements.
+alwaysApply: false
+---
+
+# Multiple Canvas Rendering with Three.js WebGPU
+
+This recipe demonstrates how to render multiple independent Three.js scenes to separate canvas elements using a single WebGPU renderer.
+
+## Overview
+
+The technique enables:
+- Rendering many 3D views on a single page (e.g., product galleries, dashboards)
+- Independent camera controls for each canvas
+- Shared renderer resources for better performance
+- Each canvas has its own scene, camera, and interactivity
+
+## Prerequisites
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { color } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+```
+
+## Core Concept: CanvasTarget
+
+The key to multi-canvas rendering is `THREE.CanvasTarget`. This class wraps a canvas element and allows the WebGPU renderer to output to it.
+
+```javascript
+const canvasTarget = new THREE.CanvasTarget( canvasElement );
+canvasTarget.setPixelRatio( window.devicePixelRatio );
+canvasTarget.setSize( width, height );
+```
+
+## Implementation Steps
+
+### 1. Create the Renderer
+
+Create a single WebGPU renderer instance. This renderer will be shared across all canvases:
+
+```javascript
+const renderer = new THREE.WebGPURenderer( { antialias: true } );
+renderer.setClearColor( 0xffffff, 1 );
+renderer.setPixelRatio( window.devicePixelRatio );
+renderer.setAnimationLoop( animate );
+```
+
+**Important:** The renderer does NOT need to be appended to the DOM. It acts as a rendering engine that outputs to various CanvasTargets.
+
+### 2. Create Individual Canvases and Scenes
+
+For each 3D view, create:
+- A canvas element in the DOM
+- A `THREE.CanvasTarget` wrapping that canvas
+- A `THREE.Scene` with its own objects
+- A `THREE.Camera` for that scene
+
+```javascript
+const scenes = [];
+
+for ( let i = 0; i < 40; i++ ) {
+
+    // Create scene
+    const scene = new THREE.Scene();
+    scene.backgroundNode = color( 0xeeeeee );
+
+    // Create canvas element
+    const sceneCanvas = document.createElement( 'canvas' );
+    container.appendChild( sceneCanvas );
+
+    // Wrap canvas in CanvasTarget
+    const canvasTarget = new THREE.CanvasTarget( sceneCanvas );
+    canvasTarget.setPixelRatio( window.devicePixelRatio );
+    canvasTarget.setSize( 200, 200 );
+
+    // Store reference on scene
+    scene.userData.canvasTarget = canvasTarget;
+
+    // Create camera for this scene
+    const camera = new THREE.PerspectiveCamera( 50, 1, 1, 10 );
+    camera.position.z = 2;
+    scene.userData.camera = camera;
+
+    // Add objects, lights to scene...
+    scene.add( new THREE.Mesh( geometry, material ) );
+    scene.add( new THREE.HemisphereLight( 0xaaaaaa, 0x444444, 3 ) );
+
+    scenes.push( scene );
+
+}
+```
+
+### 3. Add Per-Canvas Controls (Optional)
+
+Each canvas can have its own OrbitControls or other interaction:
+
+```javascript
+const controls = new OrbitControls( 
+    scene.userData.camera, 
+    scene.userData.canvasTarget.domElement 
+);
+controls.minDistance = 2;
+controls.maxDistance = 5;
+controls.enablePan = false;
+controls.enableZoom = false;
+scene.userData.controls = controls;
+```
+
+**Key:** Pass `canvasTarget.domElement` as the control's DOM element, not the renderer's canvas.
+
+### 4. Render Loop
+
+In the animation loop, iterate through all scenes and render each to its canvas target:
+
+```javascript
+function animate() {
+
+    scenes.forEach( function ( scene ) {
+
+        const { canvasTarget, camera, controls } = scene.userData;
+
+        // Update controls if using them
+        // controls.update();
+
+        // Set the target canvas for this render
+        renderer.setCanvasTarget( canvasTarget );
+
+        // Render the scene to that canvas
+        renderer.render( scene, camera );
+
+    } );
+
+}
+```
+
+**Critical Method:** `renderer.setCanvasTarget( canvasTarget )` tells the renderer which canvas to output to before calling `render()`.
+
+## Complete Example Code
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { color } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+let renderer;
+const scenes = [];
+
+function init() {
+
+    const geometries = [
+        new THREE.BoxGeometry( 1, 1, 1 ),
+        new THREE.SphereGeometry( 0.5, 12, 8 ),
+        new THREE.DodecahedronGeometry( 0.5 ),
+        new THREE.CylinderGeometry( 0.5, 0.5, 1, 12 )
+    ];
+
+    const content = document.getElementById( 'content' );
+
+    for ( let i = 0; i < 40; i++ ) {
+
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.backgroundNode = color( 0xeeeeee );
+
+        // DOM element for this scene
+        const element = document.createElement( 'div' );
+        element.className = 'list-item';
+
+        const sceneCanvas = document.createElement( 'canvas' );
+        element.appendChild( sceneCanvas );
+        content.appendChild( element );
+
+        // Canvas target
+        const canvasTarget = new THREE.CanvasTarget( sceneCanvas );
+        canvasTarget.setPixelRatio( window.devicePixelRatio );
+        canvasTarget.setSize( 200, 200 );
+        scene.userData.canvasTarget = canvasTarget;
+
+        // Camera
+        const camera = new THREE.PerspectiveCamera( 50, 1, 1, 10 );
+        camera.position.z = 2;
+        scene.userData.camera = camera;
+
+        // Controls
+        const controls = new OrbitControls( camera, canvasTarget.domElement );
+        controls.minDistance = 2;
+        controls.maxDistance = 5;
+        controls.enablePan = false;
+        controls.enableZoom = false;
+        scene.userData.controls = controls;
+
+        // Mesh
+        const geometry = geometries[ Math.floor( Math.random() * geometries.length ) ];
+        const material = new THREE.MeshStandardMaterial( {
+            color: new THREE.Color().setHSL( Math.random(), 1, 0.75, THREE.SRGBColorSpace ),
+            roughness: 0.5,
+            metalness: 0,
+            flatShading: true
+        } );
+        scene.add( new THREE.Mesh( geometry, material ) );
+
+        // Lights
+        scene.add( new THREE.HemisphereLight( 0xaaaaaa, 0x444444, 3 ) );
+        const light = new THREE.DirectionalLight( 0xffffff, 1.5 );
+        light.position.set( 1, 1, 1 );
+        scene.add( light );
+
+        scenes.push( scene );
+
+    }
+
+    // Single shared renderer
+    renderer = new THREE.WebGPURenderer( { antialias: true } );
+    renderer.setClearColor( 0xffffff, 1 );
+    renderer.setPixelRatio( window.devicePixelRatio );
+    renderer.setAnimationLoop( animate );
+
+}
+
+function animate() {
+
+    scenes.forEach( function ( scene ) {
+
+        const { canvasTarget, camera } = scene.userData;
+
+        renderer.setCanvasTarget( canvasTarget );
+        renderer.render( scene, camera );
+
+    } );
+
+}
+
+init();
+```
+
+## Key API Reference
+
+| Class/Method | Purpose |
+|--------------|---------|
+| `THREE.CanvasTarget( canvas )` | Wraps a canvas element for render output |
+| `canvasTarget.setPixelRatio( ratio )` | Sets device pixel ratio for the canvas |
+| `canvasTarget.setSize( width, height )` | Sets canvas dimensions |
+| `canvasTarget.domElement` | The underlying canvas element (for controls) |
+| `renderer.setCanvasTarget( target )` | Sets which canvas to render to next |
+| `scene.userData` | Convenient storage for per-scene data |
+
+## Architecture Pattern
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  WebGPURenderer (shared)                │
+└─────────────────────────────────────────────────────────┘
+                            │
+          ┌─────────────────┼─────────────────┐
+          │                 │                 │
+          ▼                 ▼                 ▼
+   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+   │CanvasTarget │   │CanvasTarget │   │CanvasTarget │
+   │   + Scene   │   │   + Scene   │   │   + Scene   │
+   │   + Camera  │   │   + Camera  │   │   + Camera  │
+   │  + Controls │   │  + Controls │   │  + Controls │
+   └─────────────┘   └─────────────┘   └─────────────┘
+```
+
+## Dynamic Resizing
+
+To handle canvas resize, update both the CanvasTarget and camera:
+
+```javascript
+function resizeCanvas( scene, width, height ) {
+
+    const { canvasTarget, camera } = scene.userData;
+    
+    canvasTarget.setSize( width, height );
+    
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+
+}
+```
+
+## Performance Considerations
+
+- **Single Renderer:** Sharing one renderer across all canvases is more efficient than creating multiple renderers
+- **Render Order:** All canvases are rendered sequentially in the animation loop
+- **Visibility Culling:** For many canvases, consider skipping render for off-screen canvases:
+
+```javascript
+function isElementVisible( element ) {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 0 && rect.top < window.innerHeight;
+}
+
+function animate() {
+    scenes.forEach( function ( scene ) {
+        const { canvasTarget, camera } = scene.userData;
+        
+        // Skip if not visible
+        if ( !isElementVisible( canvasTarget.domElement ) ) return;
+        
+        renderer.setCanvasTarget( canvasTarget );
+        renderer.render( scene, camera );
+    } );
+}
+```
+
+## Common Use Cases
+
+1. **Product Galleries** - Display multiple 3D product views with individual rotation
+2. **Dashboards** - Multiple data visualizations on one page
+3. **Comparison Views** - Side-by-side 3D model comparisons
+4. **Thumbnail Previews** - 3D previews in a file browser or asset list
+5. **Educational Content** - Multiple interactive diagrams in documentation
+
+## Renderer Requirements
+
+This technique requires the WebGPU renderer:
+
+```javascript
+renderer = new THREE.WebGPURenderer( { antialias: true } );
+```
+
+## Notes
+
+- The renderer's own canvas is not used directly; it serves as the GPU context provider
+- Each `CanvasTarget` maintains its own size and pixel ratio independently
+- `scene.backgroundNode` with TSL works seamlessly per-scene
+- All standard Three.js features (lights, materials, post-processing) work with this pattern
+- Controls must reference the correct `canvasTarget.domElement` for proper mouse/touch handling
+
+

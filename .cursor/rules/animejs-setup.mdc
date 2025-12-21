@@ -1,0 +1,225 @@
+---
+description: How to setup anime.js v4 with React, including a typed useAnime hook for scoped animations.
+alwaysApply: false
+---
+
+# Anime.js + React Setup
+
+This guide covers setting up anime.js v4 with React using a custom hook for scoped, type-safe animations.
+
+## Installation
+
+```bash
+pnpm add animejs
+```
+
+---
+
+## The useAnime Hook
+
+Create `src/lib/anime/use-anime.ts`:
+
+```ts
+import {
+  createScope,
+  Scope,
+  ScopeConstructorCallback,
+  ScopeMethod,
+} from "animejs";
+
+import { useEffect, useMemo, useRef } from "react";
+
+type Methods = Record<string, ScopeMethod>;
+
+interface UseAnimeParams<T extends Methods> {
+  add?: ScopeConstructorCallback;
+  methods?: T;
+}
+
+interface TypedScope<T extends Methods> extends Omit<Scope, "methods"> {
+  methods: T;
+}
+
+export function useAnime<T extends Methods>(
+  params: UseAnimeParams<T> = {}
+): TypedScope<T> {
+  const paramsRef = useRef(params);
+  paramsRef.current = params;
+
+  const scope = useMemo(() => {
+    const scope = createScope();
+    scope.add((self) => {
+      if (params.add) {
+        self?.add((...args) => {
+          paramsRef.current.add?.(...args);
+        });
+      }
+      if (params.methods) {
+        Object.entries(params.methods).map(([k]) => {
+          self?.add(k, (...args) => {
+            if (paramsRef.current.methods?.[k]) {
+              paramsRef.current.methods[k](...args);
+            }
+          });
+        });
+      }
+    });
+
+    return scope;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const scopeKeys = Object.keys(params.methods || {});
+
+  useEffect(() => {
+    if (params.methods) {
+      Object.entries(params.methods).map(([k]) => {
+        scope.add(k, (...args) => {
+          if (paramsRef.current.methods?.[k]) {
+            paramsRef.current.methods[k](...args);
+          }
+        });
+      });
+    }
+
+    return () => {
+      scope.revert();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, scopeKeys);
+
+  return scope as TypedScope<T>;
+}
+```
+
+---
+
+## Basic Usage
+
+### Animating Objects
+
+The hook works great with Three.js uniforms, DOM elements, or any object with numeric properties:
+
+```tsx
+import { useAnime } from "@/src/lib/anime/use-anime";
+import { animate, cubicBezier } from "animejs";
+import { useMemo } from "react";
+import { uniform } from "three/tsl";
+
+function MyComponent() {
+  const progress = useMemo(() => uniform(0), []);
+
+  const scope = useAnime({
+    methods: {
+      reveal: () => {
+        animate(progress, {
+          value: 1,
+          duration: 2000,
+          ease: cubicBezier(0.25, 0.1, 0.25, 1),
+        });
+      },
+      hide: () => {
+        animate(progress, {
+          value: 0,
+          duration: 1000,
+          ease: "easeOutQuad",
+        });
+      },
+    },
+  });
+
+  const handleClick = () => {
+    scope.methods.reveal();
+  };
+
+  return <button onClick={handleClick}>Reveal</button>;
+}
+```
+
+### Animating Camera Position
+
+```tsx
+import { useAnime } from "@/src/lib/anime/use-anime";
+import { animate, cubicBezier } from "animejs";
+import { useThree } from "@react-three/fiber";
+import * as THREE from "three";
+
+function CameraController() {
+  const camera = useThree((s) => s.camera);
+  const center = new THREE.Vector3(0, 0, 0);
+
+  const scope = useAnime({
+    methods: {
+      zoomIn: () => {
+        animate(camera.position, {
+          z: 2,
+          x: 0,
+          y: 1,
+          duration: 2000,
+          ease: cubicBezier(0.25, 0.1, 0.25, 1),
+          onUpdate: () => {
+            camera.lookAt(center);
+          },
+        });
+      },
+      zoomOut: () => {
+        animate(camera.position, {
+          z: 10,
+          x: 0,
+          y: 0,
+          duration: 1500,
+          ease: "easeInOutQuad",
+          onUpdate: () => {
+            camera.lookAt(center);
+          },
+        });
+      },
+    },
+  });
+
+  return null;
+}
+```
+
+---
+
+## Common Easing Functions
+
+```tsx
+import { animate, cubicBezier } from "animejs";
+
+// Built-in easings
+animate(target, { value: 1, ease: "easeOutQuad" });
+animate(target, { value: 1, ease: "easeInOutCubic" });
+animate(target, { value: 1, ease: "easeOutElastic" });
+animate(target, { value: 1, ease: "easeOutBounce" });
+
+// Custom cubic-bezier
+animate(target, {
+  value: 1,
+  ease: cubicBezier(0.25, 0.1, 0.25, 1), // ease-out
+});
+
+animate(target, {
+  value: 1,
+  ease: cubicBezier(0.144, 0.308, 0.244, 0.992), // smooth reveal
+});
+```
+
+---
+
+## Key Features
+
+1. **Scoped Animations**: All animations are automatically cleaned up on unmount via `scope.revert()`
+2. **Type-safe Methods**: Methods are fully typed - autocomplete works for `scope.methods.*`
+3. **Ref Pattern**: Uses `paramsRef` to always access the latest callback without recreating the scope
+4. **Works with Any Object**: Three.js uniforms, camera, DOM elements, plain objects
+
+---
+
+## Tips
+
+- **Uniforms**: Animate `.value` property of Three.js uniforms directly
+- **Callbacks**: Use `onUpdate` for side effects during animation (e.g., `camera.lookAt`)
+- **Chaining**: Return animations and use `.then()` for sequencing
+- **Cleanup**: The scope automatically reverts all animations on component unmount

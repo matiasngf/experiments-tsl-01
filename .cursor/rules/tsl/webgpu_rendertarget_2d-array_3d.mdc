@@ -1,0 +1,288 @@
+---
+description: Working with 3D textures and 2D texture arrays in WebGPU.
+alwaysApply: false
+---
+
+# WebGPU RenderTarget 2D-Array and 3D Textures
+
+This recipe demonstrates how to work with 3D textures and 2D texture arrays in Three.js WebGPU, including creating render targets that can write to individual slices/layers.
+
+## Core Concepts
+
+### Texture Types Covered
+
+1. **Data3DTexture** - A true 3D texture with width, height, and depth dimensions
+2. **DataArrayTexture** - A 2D array texture (stack of 2D textures)
+3. **RenderTarget3D** - Render target for 3D textures (can render to individual depth slices)
+4. **RenderTargetArray** - Render target for 2D array textures (can render to individual layers)
+
+### Key Difference
+
+- **Data3DTexture**: Supports trilinear filtering between depth slices
+- **DataArrayTexture**: Each layer is independent, no filtering between layers
+
+---
+
+## Implementation
+
+### 1. Basic Setup
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { vec2, uniform, screenUV, color, texture, diffuseColor, attribute, vec3, vec4 } from 'three/tsl';
+import { TextureHelper } from 'three/addons/helpers/TextureHelperGPU.js';
+
+const renderer = new THREE.WebGPURenderer();
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.autoClear = false;
+document.body.appendChild(renderer.domElement);
+
+await renderer.init();
+```
+
+### 2. Creating a Data3DTexture
+
+Load or create volumetric data and wrap it in a 3D texture:
+
+```javascript
+const size = {
+    width: 256,
+    height: 256,
+    depth: 109
+};
+
+// Create 3D texture from raw data (e.g., medical imaging, volumetric data)
+const map3D = new THREE.Data3DTexture(array, size.width, size.height, size.depth);
+map3D.format = THREE.RedFormat;           // Single channel
+map3D.minFilter = THREE.LinearFilter;     // Enable trilinear filtering
+map3D.magFilter = THREE.LinearFilter;
+map3D.unpackAlignment = 1;                // For non-RGBA data
+map3D.needsUpdate = true;
+```
+
+### 3. Creating a DataArrayTexture
+
+Similar to 3D texture but each layer is independent:
+
+```javascript
+const mapArray = new THREE.DataArrayTexture(array, size.width, size.height, size.depth);
+mapArray.format = THREE.RedFormat;
+mapArray.minFilter = THREE.LinearFilter;
+mapArray.magFilter = THREE.LinearFilter;
+mapArray.unpackAlignment = 1;
+mapArray.needsUpdate = true;
+```
+
+### 4. Creating Render Targets
+
+#### RenderTarget3D (for 3D textures)
+
+```javascript
+const fbo3D = new THREE.RenderTarget3D(size.width, size.height, size.depth, {
+    depthBuffer: false,
+});
+fbo3D.texture.name = 'RenderTarget3D';
+```
+
+#### RenderTargetArray (for 2D array textures)
+
+```javascript
+const fboArray = new THREE.RenderTarget(size.width, size.height, {
+    depthBuffer: false,
+    depth: size.depth  // Number of layers
+});
+fboArray.texture.name = 'RenderTargetArray';
+```
+
+### 5. Rendering to Individual Slices/Layers
+
+Use a QuadMesh to render full-screen content to each slice:
+
+```javascript
+// Create material that samples from source texture at specific depth
+const materialQuad = new THREE.NodeMaterial();
+const uZCoord = uniform(0);  // Which slice to sample
+materialQuad.depthTest = false;
+materialQuad.outputNode = vec4(texture(mapArray).depth(uZCoord).rgb, 1);
+
+const quadMesh = new THREE.QuadMesh(materialQuad);
+```
+
+#### WebGPU Requirement: Clear All Slices First
+
+WebGPU requires clearing all layers before rendering:
+
+```javascript
+if (renderer.backend.isWebGPUBackend) {
+    const materialClear = new THREE.NodeMaterial();
+    materialClear.outputNode = vec4(0);
+    const clearQuadMesh = new THREE.QuadMesh(materialClear);
+    
+    for (let i = 0; i < size.depth; i++) {
+        renderer.setRenderTarget(fbo3D, i);  // Second param is slice index
+        clearQuadMesh.render(renderer);
+    }
+}
+```
+
+#### Render to Each Slice
+
+```javascript
+for (let layer = 0; layer < size.depth; layer++) {
+    // Set viewport for FBO rendering
+    renderer.setViewport(0, 0, size.width, size.height);
+    renderer.setScissor(0, 0, size.width, size.height);
+    renderer.setScissorTest(false);
+    
+    // Update which slice to sample from source
+    uZCoord.value = layer;
+    
+    // Render to array texture layer
+    renderer.setRenderTarget(fboArray, layer);
+    renderer.clear();
+    quadMesh.render(renderer);
+    
+    // Render to 3D texture slice
+    renderer.setRenderTarget(fbo3D, layer);
+    renderer.clear();
+    quadMesh.render(renderer);
+}
+
+// Reset render target
+renderer.setRenderTarget(null);
+```
+
+### 6. Visualizing with TextureHelper
+
+TextureHelper creates a visual representation of 3D/array textures:
+
+```javascript
+const depth = size.depth / 20;  // Visual depth scaling
+
+// For 3D texture
+const helper3D = new TextureHelper(map3D, 10, 10, depth);
+helper3D.material.outputNode = vec4(
+    vec3(diffuseColor.r.mul(attribute('uvw').z.mul(diffuseColor.r))),
+    diffuseColor.r.mul(diffuseColor.a)
+);
+scene.add(helper3D);
+
+// For array texture
+const helperArray = new TextureHelper(mapArray, 10, 10, depth);
+helperArray.material.outputNode = vec4(
+    vec3(diffuseColor.r.mul(attribute('uvw').z.div(size.depth).mul(diffuseColor.r))),
+    diffuseColor.r.mul(diffuseColor.a)
+);
+scene.add(helperArray);
+```
+
+### 7. Sampling from 3D/Array Textures in TSL
+
+```javascript
+// Sample from array texture at specific layer
+texture(mapArray).depth(layerIndex)
+
+// Sample from 3D texture at specific depth (0-1 normalized)
+texture(map3D).depth(normalizedDepth)
+
+// Access UVW coordinates in shader
+attribute('uvw').z  // Depth coordinate
+```
+
+---
+
+## Multi-Viewport Rendering Pattern
+
+This example also demonstrates split-screen rendering:
+
+```javascript
+class View {
+    constructor(left, top, width, height) {
+        this.left = left;    // 0-1 normalized
+        this.top = top;
+        this.width = width;
+        this.height = height;
+        
+        const aspect = (window.innerWidth * width) / (window.innerHeight * height);
+        this.camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 100);
+        this.scene = new THREE.Scene();
+        
+        // Dynamic background using TSL
+        const normalizedUV = screenUV.mul(vec2(1, -1)).add(vec2(0, 1));
+        const viewportCenter = vec2(left + width * 0.5, top + height * 0.5);
+        const distanceEffect = normalizedUV.distance(viewportCenter).smoothstep(0, 0.2);
+        this.scene.backgroundNode = color(0x212121).sub(distanceEffect.pow(0.3).mul(0.1));
+    }
+}
+
+// Create 4 viewports (2x2 grid)
+const views = [
+    new View(0.0, 0.0, 0.5, 0.5),  // Bottom-left
+    new View(0.5, 0.0, 0.5, 0.5),  // Bottom-right
+    new View(0.0, 0.5, 0.5, 0.5),  // Top-left
+    new View(0.5, 0.5, 0.5, 0.5)   // Top-right
+];
+
+// Render each viewport
+function animate() {
+    views.forEach(view => {
+        const left = Math.floor(view.left * window.innerWidth);
+        const bottom = Math.floor((1 - view.top - view.height) * window.innerHeight);
+        const width = Math.floor(view.width * window.innerWidth);
+        const height = Math.floor(view.height * window.innerHeight);
+        
+        renderer.setViewport(left, bottom, width, height);
+        renderer.setScissor(left, bottom, width, height);
+        renderer.setScissorTest(true);
+        
+        renderer.clear();
+        renderer.render(view.scene, view.camera);
+    });
+}
+```
+
+---
+
+## Key TSL Nodes Used
+
+| Node | Purpose |
+|------|---------|
+| `texture(tex).depth(z)` | Sample 3D/array texture at specific depth |
+| `attribute('uvw')` | Access 3D texture coordinates |
+| `diffuseColor` | Access the current diffuse color in material |
+| `screenUV` | Screen-space UV coordinates (0-1) |
+| `vec4()`, `vec3()` | Construct vector types |
+| `uniform(value)` | Create animatable uniform value |
+
+---
+
+## Common Use Cases
+
+1. **Medical Imaging** - Visualize CT/MRI volumetric data
+2. **Scientific Visualization** - 3D simulation data (fluid, particles)
+3. **Fog/Atmosphere LUTs** - Pre-computed volumetric lighting
+4. **Terrain Data** - Multi-layer terrain information
+5. **Cascaded Shadow Maps** - Store multiple shadow map layers
+
+---
+
+## Important Notes
+
+1. **WebGPU Backend Check**: Use `renderer.backend.isWebGPUBackend` to detect WebGPU
+2. **Clear Before Write**: WebGPU requires clearing all slices of 3D render targets before use
+3. **Slice Index**: `renderer.setRenderTarget(fbo, sliceIndex)` - second parameter selects the slice
+4. **Format Selection**: Use `THREE.RedFormat` for single-channel data to save memory
+5. **unpackAlignment**: Set to 1 for non-RGBA formats to avoid padding issues
+
+---
+
+## Dependencies
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { vec2, uniform, screenUV, color, texture, diffuseColor, attribute, vec3, vec4 } from 'three/tsl';
+import { TextureHelper } from 'three/addons/helpers/TextureHelperGPU.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+```
+

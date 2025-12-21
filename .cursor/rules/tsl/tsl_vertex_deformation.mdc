@@ -1,0 +1,882 @@
+---
+description: Vertex deformation and normal recalculation using TSL for correct lighting.
+alwaysApply: false
+---
+
+# TSL Vertex Deformation & Normal Recalculation
+
+A comprehensive guide to deforming mesh vertices using Three.js Shading Language (TSL) and properly recalculating normals for correct lighting.
+
+---
+
+## Table of Contents
+
+1. [Core Concepts](#core-concepts)
+2. [Required Imports](#required-imports)
+3. [Accessing Vertex Positions](#accessing-vertex-positions)
+4. [Basic Vertex Deformation](#basic-vertex-deformation)
+5. [Normal Recalculation Methods](#normal-recalculation-methods)
+6. [Working with Uniforms](#working-with-uniforms)
+7. [Common Patterns](#common-patterns)
+8. [Performance Considerations](#performance-considerations)
+9. [Debugging Tips](#debugging-tips)
+
+---
+
+## Core Concepts
+
+### The `positionNode` Property
+
+Node materials (`MeshStandardNodeMaterial`, `MeshPhysicalNodeMaterial`, etc.) expose a `positionNode` property that lets you override vertex positions in the vertex shader:
+
+```javascript
+material.positionNode = Fn(() => {
+  // Return modified position
+  return modifiedPosition;
+})();
+```
+
+### The `normalNode` Property
+
+When you deform geometry, the original normals become incorrect. Use `normalNode` to provide recalculated normals for proper lighting:
+
+```javascript
+material.normalNode = transformNormalToView(newNormal);
+```
+
+### Varyings: Passing Data to Fragment Shader
+
+When computing values in the vertex shader that need to reach the fragment shader, use `.toVarying()`:
+
+```javascript
+// Inside positionNode function
+mat.normalNode = transformNormalToView(normal).toVarying();
+```
+
+---
+
+## Required Imports
+
+```javascript
+import * as THREE from "three/webgpu";
+import {
+  // Core
+  Fn,
+  uniform,
+  attribute,
+
+  // Position nodes
+  positionLocal, // Object-space position
+  positionWorld, // World-space position
+  positionView, // View/camera-space position
+  positionClip, // Clip-space position (after projection)
+
+  // Other built-in attributes
+  normalLocal, // Object-space normal
+  normalWorld, // World-space normal
+  normalView, // View-space normal
+  uv, // Texture coordinates
+  vertexIndex, // Current vertex index
+  instanceIndex, // Current instance index (for instanced meshes)
+
+  // Vector constructors
+  vec2,
+  vec3,
+  vec4,
+
+  // Type casting
+  float,
+  int,
+  uint,
+
+  // Math operations
+  sin,
+  cos,
+  tan,
+  atan2,
+  pow,
+  sqrt,
+  abs,
+  sign,
+  floor,
+  ceil,
+  fract,
+  mod,
+  min,
+  max,
+  clamp,
+  mix,
+  smoothstep,
+  step,
+  normalize,
+  length,
+  distance,
+  dot,
+  cross,
+  reflect,
+  refract,
+
+  // Matrix operations
+  mul, // Matrix multiplication
+
+  // Constants
+  PI,
+
+  // Transform utilities
+  transformNormalToView,
+  modelWorldMatrix,
+  modelViewMatrix,
+  projectionMatrix,
+  cameraPosition,
+
+  // Time
+  time,
+
+  // Conditionals
+  select,
+  If,
+} from "three/tsl";
+```
+
+---
+
+## Accessing Vertex Positions
+
+TSL provides access to vertex positions in different coordinate spaces:
+
+### Local/Object Space (`positionLocal`)
+
+The vertex position relative to the mesh's origin, before any transforms:
+
+```javascript
+material.positionNode = Fn(() => {
+  const pos = positionLocal.toVar();
+
+  // pos.x, pos.y, pos.z are in object space
+  // Typical range depends on geometry (e.g., -0.5 to 0.5 for unit cube)
+
+  pos.z = sin(pos.x.mul(10));
+  return pos;
+})();
+```
+
+### World Space (`positionWorld`)
+
+Position after model matrix transform (translation, rotation, scale applied):
+
+```javascript
+material.positionNode = Fn(() => {
+  const worldPos = positionWorld;
+
+  // Use world position for effects that should be consistent
+  // regardless of object placement
+  const wave = sin(worldPos.x.add(time));
+
+  // Still return local position (modified)
+  const pos = positionLocal.toVar();
+  pos.z = wave.mul(0.1);
+  return pos;
+})();
+```
+
+### View/Camera Space (`positionView`)
+
+Position relative to the camera (camera at origin, looking down -Z):
+
+```javascript
+material.positionNode = Fn(() => {
+  const viewPos = positionView;
+
+  // Distance from camera
+  const distFromCamera = length(viewPos);
+
+  // Useful for distance-based effects
+  const pos = positionLocal.toVar();
+  pos.z = distFromCamera.mul(0.01);
+  return pos;
+})();
+```
+
+### Clip Space (`positionClip`)
+
+Position after projection (normalized device coordinates):
+
+```javascript
+// Clip space is typically used for post-processing effects
+// x, y range: -1 to 1 (visible screen area)
+// z: depth value
+
+const clipPos = positionClip;
+const screenX = clipPos.x; // -1 (left) to 1 (right)
+const screenY = clipPos.y; // -1 (bottom) to 1 (top)
+```
+
+### Screen Space (Derived)
+
+Convert clip space to screen UV coordinates (0 to 1):
+
+```javascript
+material.positionNode = Fn(() => {
+  const clipPos = positionClip;
+
+  // Convert to 0-1 range
+  const screenUV = clipPos.xy.div(clipPos.w).mul(0.5).add(0.5);
+
+  // screenUV.x: 0 (left) to 1 (right)
+  // screenUV.y: 0 (bottom) to 1 (top)
+
+  return positionLocal;
+})();
+```
+
+### Comparison Table
+
+| Node            | Space  | Use Case                               |
+| --------------- | ------ | -------------------------------------- |
+| `positionLocal` | Object | Most deformations, procedural effects  |
+| `positionWorld` | World  | Global effects, world-aligned patterns |
+| `positionView`  | Camera | Distance-based effects, billboarding   |
+| `positionClip`  | NDC    | Screen-space effects, post-processing  |
+
+### Accessing Original Normals
+
+Similarly, normals are available in different spaces:
+
+```javascript
+const localNormal = normalLocal; // Object space
+const worldNormal = normalWorld; // World space
+const viewNormal = normalView; // View/camera space
+```
+
+### Accessing UV Coordinates
+
+```javascript
+const texCoord = uv(); // Returns vec2
+const u = texCoord.x; // 0 to 1 horizontally
+const v = texCoord.y; // 0 to 1 vertically
+```
+
+### Accessing Vertex/Instance Index
+
+```javascript
+const vIdx = vertexIndex; // uint - which vertex (0, 1, 2, ...)
+const iIdx = instanceIndex; // uint - which instance (for InstancedMesh)
+```
+
+---
+
+## Basic Vertex Deformation
+
+### Minimal Example
+
+```javascript
+import { Fn, positionLocal, sin, time } from "three/tsl";
+import { MeshStandardNodeMaterial } from "three/webgpu";
+
+const material = new MeshStandardNodeMaterial({ color: 0x2194ce });
+
+material.positionNode = Fn(() => {
+  const pos = positionLocal.toVar();
+
+  // Simple wave deformation
+  pos.z = sin(pos.x.mul(10).add(time)).mul(0.1);
+
+  return pos;
+})();
+```
+
+### Key Patterns
+
+#### 1. The `Fn(() => ...)()` Pattern
+
+The double parentheses are required:
+
+- `Fn(() => ...)` creates a TSL function builder
+- The final `()` executes it to create the node
+
+```javascript
+// ✅ Correct
+material.positionNode = Fn(() => {
+  return pos;
+})();
+
+// ❌ Wrong - missing final ()
+material.positionNode = Fn(() => {
+  return pos;
+});
+```
+
+#### 2. Using `.toVar()` for Mutation
+
+Positions are read-only by default. Use `.toVar()` to make them mutable:
+
+```javascript
+// ❌ Won't work - positionLocal is immutable
+positionLocal.z = sin(time);
+
+// ✅ Correct - create mutable copy
+const pos = positionLocal.toVar();
+pos.z = sin(time);
+```
+
+#### 3. Accessing Material for Normal Assignment
+
+Pass `{ material }` to the function to access the material for setting normals:
+
+```javascript
+material.positionNode = Fn(({ material: mat }) => {
+  const pos = positionLocal.toVar();
+
+  // ... deformation ...
+
+  // Assign normal to material
+  mat.normalNode = transformNormalToView(newNormal).toVarying();
+
+  return pos;
+})();
+```
+
+---
+
+## Normal Recalculation Methods
+
+When you deform vertices, the original normals no longer correctly represent the surface orientation. Here are different methods to recalculate them:
+
+### Method 1: Analytical Derivatives
+
+**Best for**: Simple mathematical deformations where you can derive the formula.
+
+The normal of a surface can be computed from partial derivatives. For a height-field deformation `z = f(x, y)`:
+
+```
+tangent_x = (1, 0, ∂z/∂x)
+tangent_y = (0, 1, ∂z/∂y)
+normal = normalize(cross(tangent_x, tangent_y))
+       = normalize(-∂z/∂x, -∂z/∂y, 1)
+```
+
+```javascript
+material.positionNode = Fn(({ material: mat }) => {
+  const pos = positionLocal.toVar();
+
+  // Deformation: z = sin(x * freq) * amp
+  const freq = float(10);
+  const amp = float(0.1);
+  const wave = sin(pos.x.mul(freq).add(time)).mul(amp);
+  pos.z = wave;
+
+  // Analytical derivative: ∂z/∂x = cos(x * freq) * freq * amp
+  const dzdx = cos(pos.x.mul(freq).add(time)).mul(freq).mul(amp);
+  const dzdy = float(0); // No Y dependency
+
+  // Normal from gradient
+  const normal = normalize(vec3(dzdx.negate(), dzdy.negate(), 1));
+
+  mat.normalNode = transformNormalToView(normal).toVarying();
+
+  return pos;
+})();
+```
+
+**Pros**: Exact, computationally efficient  
+**Cons**: Requires calculus to derive formulas
+
+### Method 2: Finite Differences (Numerical Derivatives)
+
+**Best for**: Complex deformations where analytical derivatives are difficult.
+
+Sample the deformation function at nearby points to approximate the derivative:
+
+```
+∂z/∂x ≈ (z(x+ε) - z(x-ε)) / (2ε)
+```
+
+```javascript
+// Define deformation as a reusable function
+const getDeformedZ = (x, y) => {
+  // Complex deformation that's hard to differentiate
+  return sin(x.mul(10).add(time))
+    .mul(cos(y.mul(7).sub(time.mul(0.5))))
+    .mul(0.1);
+};
+
+material.positionNode = Fn(({ material: mat }) => {
+  const pos = positionLocal.toVar();
+
+  // Apply deformation
+  pos.z = getDeformedZ(pos.x, pos.y);
+
+  // Finite difference step size
+  const epsilon = float(0.001);
+
+  // Sample neighbors
+  const zRight = getDeformedZ(pos.x.add(epsilon), pos.y);
+  const zLeft = getDeformedZ(pos.x.sub(epsilon), pos.y);
+  const zUp = getDeformedZ(pos.x, pos.y.add(epsilon));
+  const zDown = getDeformedZ(pos.x, pos.y.sub(epsilon));
+
+  // Central differences
+  const dzdx = zRight.sub(zLeft).div(epsilon.mul(2));
+  const dzdy = zUp.sub(zDown).div(epsilon.mul(2));
+
+  // Normal from gradient
+  const normal = normalize(vec3(dzdx.negate(), dzdy.negate(), 1));
+
+  mat.normalNode = transformNormalToView(normal).toVarying();
+
+  return pos;
+})();
+```
+
+**Pros**: Works for any deformation function  
+**Cons**: 4+ extra evaluations per vertex, epsilon must be tuned
+
+### Method 3: Cross Product from Tangent Vectors
+
+**Best for**: Parametric surfaces, cylindrical/spherical deformations.
+
+When you know how position changes along two surface directions:
+
+```javascript
+material.positionNode = Fn(({ material: mat }) => {
+  const pos = positionLocal.toVar();
+
+  // Example: Cylindrical bend around Y axis
+  const bendAmount = uniform(1);
+  const radius = float(0.5);
+
+  const theta = pos.x.mul(bendAmount).div(radius);
+
+  // Bent position
+  const bentX = sin(theta).mul(radius);
+  const bentZ = cos(theta).mul(radius).sub(radius);
+
+  pos.x = bentX;
+  pos.z = pos.z.add(bentZ);
+
+  // Tangent along X (direction of bend)
+  const tangent = normalize(vec3(cos(theta), 0, sin(theta).negate()));
+
+  // Bitangent along Y (unchanged)
+  const bitangent = vec3(0, 1, 0);
+
+  // Normal = cross(tangent, bitangent)
+  const normal = normalize(cross(tangent, bitangent));
+
+  mat.normalNode = transformNormalToView(normal).toVarying();
+
+  return pos;
+})();
+```
+
+**Pros**: Geometrically intuitive, good for curved surfaces  
+**Cons**: Need to understand the parameterization
+
+### Method 4: Neighbor Vertex Sampling (GPU Buffers)
+
+**Best for**: Simulation-driven deformations (cloth, water), compute shader output.
+
+Read actual vertex positions from a GPU buffer and compute normals from triangle edges:
+
+```javascript
+import { instancedArray, attribute } from "three/tsl";
+
+// GPU buffer with vertex positions (from compute shader)
+const positionBuffer = instancedArray(positionData, "vec3");
+
+// Geometry needs custom attribute with neighbor vertex IDs
+// geometry.setAttribute('neighbors', new BufferAttribute(neighborIds, 4));
+
+material.positionNode = Fn(({ material: mat }) => {
+  const neighbors = attribute("neighbors"); // uvec4 or vec4
+
+  // Read 4 neighboring vertex positions
+  const v0 = positionBuffer.element(neighbors.x).toVar();
+  const v1 = positionBuffer.element(neighbors.y).toVar();
+  const v2 = positionBuffer.element(neighbors.z).toVar();
+  const v3 = positionBuffer.element(neighbors.w).toVar();
+
+  // Calculate tangent/bitangent from edges
+  const top = v0.add(v1);
+  const right = v1.add(v3);
+  const bottom = v2.add(v3);
+  const left = v0.add(v2);
+
+  const tangent = right.sub(left).normalize();
+  const bitangent = bottom.sub(top).normalize();
+  const normal = cross(tangent, bitangent);
+
+  mat.normalNode = transformNormalToView(normal).toVarying();
+
+  // Return averaged position
+  return v0.add(v1).add(v2).add(v3).mul(0.25);
+})();
+```
+
+**Pros**: Most accurate for dynamic simulations  
+**Cons**: Requires buffer setup and custom geometry attributes
+
+### Method 5: Blend with Original Normal
+
+**Best for**: Subtle deformations where you want to preserve some original detail.
+
+```javascript
+material.positionNode = Fn(({ material: mat }) => {
+  const pos = positionLocal.toVar();
+
+  // Subtle deformation
+  const deformStrength = float(0.3);
+  pos.z = pos.z.add(sin(pos.x.mul(5)).mul(0.05).mul(deformStrength));
+
+  // Approximate new normal
+  const dzdx = cos(pos.x.mul(5)).mul(5).mul(0.05).mul(deformStrength);
+  const deformedNormal = normalize(vec3(dzdx.negate(), 0, 1));
+
+  // Blend with original normal
+  const blendedNormal = mix(normalLocal, deformedNormal, deformStrength);
+
+  mat.normalNode = transformNormalToView(normalize(blendedNormal)).toVarying();
+
+  return pos;
+})();
+```
+
+### Comparison Table
+
+| Method            | Accuracy    | Performance | Complexity | Use Case                   |
+| ----------------- | ----------- | ----------- | ---------- | -------------------------- |
+| Analytical        | Exact       | Fast        | Medium     | Simple math functions      |
+| Finite Difference | Good        | Medium      | Low        | Any function               |
+| Cross Product     | Exact       | Fast        | Medium     | Parametric/curved surfaces |
+| Neighbor Sampling | Exact       | Slow        | High       | Simulations                |
+| Blended           | Approximate | Fast        | Low        | Subtle effects             |
+
+---
+
+## Working with Uniforms
+
+Uniforms allow you to pass values from JavaScript to shaders and update them at runtime.
+
+### Creating Uniforms
+
+```javascript
+import { uniform } from "three/tsl";
+import { Vector2, Vector3, Color } from "three";
+
+// Scalar uniforms
+const amplitude = uniform(0.5);
+const frequency = uniform(10);
+const enabled = uniform(1); // Use 1/0 for booleans
+
+// Vector uniforms
+const offset = uniform(new Vector2(0, 0));
+const center = uniform(new Vector3(0, 0, 0));
+const tint = uniform(new Color(1, 0.5, 0));
+```
+
+### Using Uniforms in Shaders
+
+```javascript
+material.positionNode = Fn(() => {
+  const pos = positionLocal.toVar();
+
+  pos.z = sin(pos.x.mul(frequency).add(time)).mul(amplitude);
+
+  return pos;
+})();
+```
+
+### Updating Uniforms at Runtime
+
+```javascript
+// In animation loop or event handler
+amplitude.value = 0.8;
+frequency.value = 15;
+offset.value.set(0.5, 0.5);
+center.value.set(1, 2, 3);
+```
+
+### React Integration
+
+```tsx
+import { useFrame } from "@react-three/fiber";
+import { useMemo, useRef } from "react";
+
+function DeformedMesh() {
+  const { material, amplitude } = useMemo(() => {
+    const amp = uniform(0);
+    // ... create material with amp uniform
+    return { material, amplitude: amp };
+  }, []);
+
+  const targetAmplitude = useRef(0);
+
+  useFrame((_, delta) => {
+    // Smooth animation
+    amplitude.value += (targetAmplitude.current - amplitude.value) * delta * 5;
+  });
+
+  return <mesh material={material} />;
+}
+```
+
+---
+
+## Common Patterns
+
+### Conditional Deformation
+
+```javascript
+import { select, If, float } from "three/tsl";
+
+// Ternary-style (prefer for simple conditions)
+const result = select(condition, valueIfTrue, valueIfFalse);
+
+// Example: different deformation based on position
+const deform = select(
+  pos.x.greaterThan(0),
+  sin(pos.x.mul(10)), // Right side
+  cos(pos.x.mul(5)) // Left side
+);
+
+// If-else style (for complex logic with side effects)
+const value = float(0).toVar();
+If(pos.x.greaterThan(0), () => {
+  value.assign(sin(pos.x.mul(10)));
+})
+  .ElseIf(pos.x.greaterThan(-0.5), () => {
+    value.assign(cos(pos.x.mul(5)));
+  })
+  .Else(() => {
+    value.assign(0);
+  });
+```
+
+### Smooth Transitions
+
+```javascript
+import { smoothstep, mix, clamp } from "three/tsl";
+
+// smoothstep: S-curve interpolation between edges
+// Returns 0 when x <= edge0, 1 when x >= edge1
+const blend = smoothstep(0.2, 0.8, pos.x);
+
+// mix: linear interpolation
+const result = mix(valueA, valueB, blend);
+
+// step: hard cutoff
+const hard = step(0.5, pos.x); // 0 if pos.x < 0.5, else 1
+```
+
+### Distance-Based Effects
+
+```javascript
+import { length, distance } from "three/tsl";
+
+// Distance from origin
+const distFromOrigin = length(pos.xy);
+
+// Distance from a point
+const center = uniform(new Vector3(0, 0, 0));
+const distFromCenter = distance(pos, center.value);
+
+// Radial falloff
+const falloff = float(1).sub(clamp(distFromCenter.div(radius), 0, 1));
+```
+
+### Noise-Based Deformation
+
+```javascript
+import { triNoise3D } from "three/tsl";
+
+// Built-in 3D noise function
+const noiseValue = triNoise3D(pos.mul(noiseScale), 1, time);
+
+// Apply as displacement
+pos.addAssign(normalLocal.mul(noiseValue).mul(noiseStrength));
+```
+
+### Looping/Repeating Patterns
+
+```javascript
+import { fract, mod, floor } from "three/tsl";
+
+// Repeat position in 0-1 range
+const repeatedPos = fract(pos.mul(4));
+
+// Modulo for custom ranges
+const wrapped = mod(pos.x, float(2));
+
+// Get cell index for tiled effects
+const cellIndex = floor(pos.mul(4));
+```
+
+---
+
+## Performance Considerations
+
+### 1. Cache Expensive Calculations
+
+```javascript
+// ❌ Expensive: sin calculated twice
+const a = sin(pos.x.mul(10).add(time));
+const b = sin(pos.x.mul(10).add(time)).mul(2);
+
+// ✅ Better: cache with .toVar()
+const sinValue = sin(pos.x.mul(10).add(time)).toVar();
+const a = sinValue;
+const b = sinValue.mul(2);
+```
+
+### 2. Use `.toVar()` Only When Needed
+
+Only use `.toVar()` when you need to:
+
+- Modify a value (e.g., `pos.z = something`)
+- Reuse an expensive calculation
+- Store intermediate results
+
+```javascript
+// ❌ Unnecessary .toVar()
+const x = float(5).toVar(); // Never modified or reused
+
+// ✅ Necessary .toVar()
+const pos = positionLocal.toVar(); // Will be modified
+pos.z = sin(time);
+```
+
+### 3. Finite Difference Epsilon
+
+For finite difference normals, epsilon should be:
+
+- Small enough for accuracy
+- Large enough to avoid precision issues
+
+```javascript
+// Good starting point
+const epsilon = float(0.001);
+
+// For larger geometries, may need larger epsilon
+const epsilon = float(geometrySize * 0.001);
+```
+
+### 4. Geometry Resolution
+
+More vertices = smoother deformation but higher cost:
+
+- Start with lower resolution, increase if needed
+- Use non-uniform vertex distribution (more vertices where detail is needed)
+
+---
+
+## Debugging Tips
+
+### 1. Visualize Normals as Colors
+
+```javascript
+// Temporarily set color based on normal
+// Maps [-1, 1] to [0, 1] for RGB visualization
+material.colorNode = normalLocal.mul(0.5).add(0.5);
+```
+
+### 2. Visualize Position Components
+
+```javascript
+// Show X position as red gradient
+material.colorNode = vec3(pos.x.add(0.5), 0, 0);
+
+// Show UV coordinates
+material.colorNode = vec3(uv().x, uv().y, 0);
+```
+
+### 3. Test with Simple Deformation First
+
+```javascript
+// Simple tilt to verify setup works
+pos.z = pos.x.mul(0.5);
+
+// Simple pulse to verify time is working
+pos.z = sin(time).mul(0.1);
+```
+
+### 4. Log Uniform Values
+
+```javascript
+// In animation loop
+console.log("Amplitude:", amplitude.value);
+console.log("Time:", performance.now() / 1000);
+```
+
+### 5. Check for NaN/Infinity
+
+```javascript
+// Guard against division by zero
+const safeDist = max(distance, float(0.0001));
+const result = something.div(safeDist);
+```
+
+---
+
+## Dependencies Summary
+
+```javascript
+// Three.js WebGPU
+import * as THREE from "three/webgpu";
+
+// TSL Functions - Core
+import { Fn, uniform, attribute, time } from "three/tsl";
+
+// TSL Functions - Position/Normal Access
+import {
+  positionLocal,
+  positionWorld,
+  positionView,
+  positionClip,
+  normalLocal,
+  normalWorld,
+  normalView,
+  transformNormalToView,
+  uv,
+  vertexIndex,
+  instanceIndex,
+} from "three/tsl";
+
+// TSL Functions - Vectors & Types
+import { vec2, vec3, vec4, float, int, uint } from "three/tsl";
+
+// TSL Functions - Math
+import {
+  sin,
+  cos,
+  tan,
+  atan2,
+  pow,
+  sqrt,
+  abs,
+  sign,
+  floor,
+  ceil,
+  fract,
+  mod,
+  min,
+  max,
+  clamp,
+  mix,
+  smoothstep,
+  step,
+  normalize,
+  length,
+  distance,
+  dot,
+  cross,
+  reflect,
+  refract,
+  PI,
+} from "three/tsl";
+
+// TSL Functions - Conditionals
+import { select, If } from "three/tsl";
+
+// TSL Functions - Buffers (for compute shader integration)
+import { instancedArray } from "three/tsl";
+```

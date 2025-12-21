@@ -1,0 +1,257 @@
+---
+description: Color grading using 3D Lookup Tables (LUTs) in WebGPU.
+alwaysApply: false
+---
+
+# 3D LUT Post-Processing Effect
+
+This recipe explains how to implement color grading using 3D Lookup Tables (LUTs) in Three.js WebGPU.
+
+## Overview
+
+A 3D LUT (Lookup Table) is a color grading technique that remaps input colors to output colors using a 3D texture. Each axis of the 3D texture represents one color channel (R, G, B), and the value stored at each point defines the output color. This allows for complex, non-linear color transformations commonly used in film and photography.
+
+## Key Concepts
+
+- **3D LUT**: A 3D texture where input RGB values are used as coordinates to look up the corresponding output color
+- **Color Grading**: The process of altering/enhancing colors for stylistic or corrective purposes
+- **LUT Formats**: Common formats include `.CUBE` (Adobe), `.3dl` (Autodesk), and PNG strip images
+
+## Required Imports
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { pass, texture3D, uniform, renderOutput } from 'three/tsl';
+import { lut3D } from 'three/addons/tsl/display/Lut3DNode.js';
+
+// LUT Loaders - choose based on your LUT format
+import { LUTCubeLoader } from 'three/addons/loaders/LUTCubeLoader.js';
+import { LUT3dlLoader } from 'three/addons/loaders/LUT3dlLoader.js';
+import { LUTImageLoader } from 'three/addons/loaders/LUTImageLoader.js';
+```
+
+## Implementation Steps
+
+### 1. Load LUT Files
+
+Different loaders handle different LUT formats:
+
+```javascript
+// For .CUBE files (Adobe format)
+const lutCubeLoader = new LUTCubeLoader();
+const cubeLut = await lutCubeLoader.loadAsync('path/to/lut.CUBE');
+
+// For .3dl files (Autodesk format)
+const lut3dlLoader = new LUT3dlLoader();
+const threeDlLut = await lut3dlLoader.loadAsync('path/to/lut.3dl');
+
+// For PNG strip images (custom format)
+const lutImageLoader = new LUTImageLoader();
+const imageLut = await lutImageLoader.loadAsync('path/to/lut.png');
+```
+
+Each loader returns an object containing:
+- `texture3D`: The 3D texture containing the LUT data
+- Additional metadata depending on the format
+
+### 2. Create the Renderer
+
+```javascript
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setAnimationLoop(animate);
+document.body.appendChild(renderer.domElement);
+```
+
+### 3. Set Up Post-Processing
+
+```javascript
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// IMPORTANT: Disable default output color transform
+// This allows manual control over tone mapping and color space conversion
+postProcessing.outputColorTransform = false;
+```
+
+### 4. Create the LUT Pass
+
+```javascript
+// Create a scene pass that captures the rendered scene
+const scenePass = pass(scene, camera);
+
+// Apply output rendering (tone mapping and color space)
+const outputPass = renderOutput(scenePass);
+
+// Create the LUT pass
+// Parameters:
+// - input: The node to apply the LUT to (outputPass)
+// - lutTexture: texture3D node containing the LUT
+// - size: The resolution of the LUT (typically width of the 3D texture)
+// - intensity: A uniform controlling the effect strength (0-1)
+const intensityUniform = uniform(1);
+const lutPass = lut3D(
+    outputPass,
+    texture3D(lut.texture3D),
+    lut.texture3D.image.width,
+    intensityUniform
+);
+
+// Set the final output
+postProcessing.outputNode = lutPass;
+```
+
+### 5. Render Loop
+
+```javascript
+function animate() {
+    // Update intensity if needed
+    intensityUniform.value = params.intensity;
+    
+    // Render through post-processing
+    postProcessing.render();
+}
+```
+
+### 6. Switching LUTs at Runtime
+
+To change LUTs dynamically:
+
+```javascript
+function changeLUT(newLut) {
+    lutPass.lutNode.value = newLut.texture3D;
+    lutPass.size.value = newLut.texture3D.image.width;
+}
+```
+
+## Complete Minimal Example
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { pass, texture3D, uniform, renderOutput } from 'three/tsl';
+import { lut3D } from 'three/addons/tsl/display/Lut3DNode.js';
+import { LUTCubeLoader } from 'three/addons/loaders/LUTCubeLoader.js';
+
+let camera, scene, renderer, postProcessing, lutPass;
+const intensityUniform = uniform(1);
+
+async function init() {
+    // Scene setup
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.z = 5;
+    
+    scene = new THREE.Scene();
+    
+    // Add your scene content here
+    const geometry = new THREE.BoxGeometry();
+    const material = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+    const cube = new THREE.Mesh(geometry, material);
+    scene.add(cube);
+    
+    // Lighting
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(1, 1, 1);
+    scene.add(light);
+    scene.add(new THREE.AmbientLight(0x404040));
+    
+    // Load LUT
+    const lutLoader = new LUTCubeLoader();
+    const lut = await lutLoader.loadAsync('luts/Bourbon 64.CUBE');
+    
+    // Renderer
+    renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setAnimationLoop(animate);
+    document.body.appendChild(renderer.domElement);
+    
+    // Post-processing
+    postProcessing = new THREE.PostProcessing(renderer);
+    postProcessing.outputColorTransform = false;
+    
+    const scenePass = pass(scene, camera);
+    const outputPass = renderOutput(scenePass);
+    
+    lutPass = lut3D(
+        outputPass,
+        texture3D(lut.texture3D),
+        lut.texture3D.image.width,
+        intensityUniform
+    );
+    
+    postProcessing.outputNode = lutPass;
+    
+    // Handle resize
+    window.addEventListener('resize', onWindowResize);
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function animate() {
+    postProcessing.render();
+}
+
+init();
+```
+
+## API Reference
+
+### `lut3D(input, lutTexture, size, intensity)`
+
+Creates a 3D LUT color grading node.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `input` | `Node` | The input color node to transform |
+| `lutTexture` | `Texture3DNode` | The 3D texture containing the LUT |
+| `size` | `number` | The resolution of the LUT (e.g., 64 for a 64x64x64 LUT) |
+| `intensity` | `Node` | A uniform controlling blend between original and graded colors (0-1) |
+
+**Returns**: A node that outputs the color-graded result.
+
+**Properties on returned node**:
+- `lutNode.value`: The 3D texture (can be updated to swap LUTs)
+- `size.value`: The LUT size (update when changing LUTs of different sizes)
+- `intensityNode.value`: The intensity value (0 = original, 1 = fully graded)
+
+## LUT Loader Reference
+
+### LUTCubeLoader
+Loads Adobe `.CUBE` format files. These are text-based files commonly exported from color grading software.
+
+### LUT3dlLoader
+Loads Autodesk `.3dl` format files. Common in video editing workflows.
+
+### LUTImageLoader
+Loads LUTs stored as PNG strip images. The image is interpreted as a horizontal strip of square slices representing the 3D LUT.
+
+## Important Notes
+
+1. **outputColorTransform**: Set `postProcessing.outputColorTransform = false` to manually control when tone mapping and color space conversion happen. This ensures the LUT is applied to the correctly transformed colors.
+
+2. **renderOutput()**: Use `renderOutput(scenePass)` to apply tone mapping and output color space conversion before the LUT is applied. This is the standard color grading workflow.
+
+3. **LUT Size**: The size parameter must match the actual resolution of your LUT texture. Common sizes are 16, 32, 64, or 256.
+
+4. **Intensity Control**: The intensity uniform allows smooth transitions between the original and color-graded image, useful for UI sliders or animated transitions.
+
+## Common LUT Sources
+
+- **RocketStock**: Free cinematic LUTs
+- **FreePresets.com**: Various stylized LUTs
+- **Color grading software**: DaVinci Resolve, Adobe Premiere, etc. can export custom LUTs
+- **Create your own**: Use image editing software to create LUT strips
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Colors look wrong | Ensure `outputColorTransform = false` and use `renderOutput()` |
+| LUT not loading | Check file path and format compatibility |
+| Performance issues | Use smaller LUT sizes (32 or 64) instead of 256 |
+| Artifacts at color boundaries | Ensure proper filtering on the 3D texture |
+

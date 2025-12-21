@@ -1,0 +1,484 @@
+---
+description: Realistic ocean scene with reflective water surface and planar reflections.
+alwaysApply: false
+---
+
+# WebGPU Ocean Scene
+
+This recipe explains how to implement a realistic ocean scene using Three.js WebGPU renderer with:
+
+- **Reflective water surface** using real-time planar reflections
+- **Animated wave distortion** via normal map sampling
+- **Atmospheric sky** using the Preetham model for physically-based sky rendering
+- **Dynamic environment lighting** via PMREM (Prefiltered Mipmapped Radiance Environment Map)
+- **Floating objects** with simple vertical animation
+
+---
+
+## Table of Contents
+
+1. [Core Concepts](#core-concepts)
+2. [Required Imports](#required-imports)
+3. [Renderer Setup](#renderer-setup)
+4. [Water Implementation](#water-implementation)
+5. [Sky Implementation](#sky-implementation)
+6. [Sun Position Calculation](#sun-position-calculation)
+7. [Environment Mapping](#environment-mapping)
+8. [Adding Scene Objects](#adding-scene-objects)
+9. [Animation Loop](#animation-loop)
+10. [Complete Implementation Checklist](#complete-implementation-checklist)
+
+---
+
+## Core Concepts
+
+### Planar Reflections
+
+The water uses a reflector (mirror) to capture real-time reflections of the scene. The reflection is distorted based on animated normal maps to create the appearance of moving waves.
+
+### Normal Map Wave Animation
+
+Multiple UV-offset samples of a water normal map are combined to create complex, animated wave patterns. This is computationally cheaper than vertex-based wave simulation while still producing convincing results.
+
+### Preetham Sky Model
+
+The sky uses physically-based atmospheric scattering equations to produce realistic sky colors based on sun position, turbidity, and Rayleigh/Mie scattering coefficients.
+
+### PMREM for Environment Lighting
+
+A PMREMGenerator creates an environment map from the sky for realistic reflections on metallic objects.
+
+---
+
+## Required Imports
+
+```javascript
+import * as THREE from 'three/webgpu';
+
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { WaterMesh } from 'three/addons/objects/WaterMesh.js';
+import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+```
+
+---
+
+## Renderer Setup
+
+```javascript
+const renderer = new THREE.WebGPURenderer();
+renderer.setPixelRatio( window.devicePixelRatio );
+renderer.setSize( window.innerWidth, window.innerHeight );
+renderer.setAnimationLoop( render );
+
+// Tone mapping for HDR-like output
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.5;
+
+document.body.appendChild( renderer.domElement );
+```
+
+**Key Points:**
+- `ACESFilmicToneMapping` produces cinematic color grading
+- `toneMappingExposure` of 0.5 prevents overexposure from the bright sky
+
+---
+
+## Water Implementation
+
+### Geometry
+
+Use a large plane for the ocean surface:
+
+```javascript
+const waterGeometry = new THREE.PlaneGeometry( 10000, 10000 );
+```
+
+### Normal Map Texture
+
+```javascript
+const loader = new THREE.TextureLoader();
+const waterNormals = loader.load( 'textures/waternormals.jpg' );
+waterNormals.wrapS = waterNormals.wrapT = THREE.RepeatWrapping;
+```
+
+The normal map **must** use `RepeatWrapping` for seamless tiling across the large surface.
+
+### WaterMesh Creation
+
+```javascript
+const water = new WaterMesh(
+    waterGeometry,
+    {
+        waterNormals: waterNormals,
+        sunDirection: new THREE.Vector3(),
+        sunColor: 0xffffff,
+        waterColor: 0x001e0f,
+        distortionScale: 3.7
+    }
+);
+
+water.rotation.x = - Math.PI / 2;  // Lay flat (XZ plane)
+scene.add( water );
+```
+
+### WaterMesh Options Reference
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `waterNormals` | Texture | required | Normal map for wave animation |
+| `sunDirection` | Vector3 | (0.707, 0.707, 0) | Direction to the sun |
+| `sunColor` | Color/Hex | 0xffffff | Sun light color |
+| `waterColor` | Color/Hex | 0x7f7f7f | Base water color |
+| `distortionScale` | number | 20 | Reflection distortion amount |
+| `size` | number | 1 | UV tiling multiplier |
+| `alpha` | number | 1 | Water transparency |
+| `resolutionScale` | number | 0.5 | Reflection render resolution |
+
+### WaterMesh Uniforms (Runtime Adjustable)
+
+```javascript
+water.distortionScale.value = 3.7;  // Reflection distortion
+water.size.value = 1.0;             // Wave pattern scale
+water.sunDirection.value.copy( sunVector ).normalize();
+```
+
+---
+
+## Sky Implementation
+
+### SkyMesh Creation
+
+```javascript
+const sky = new SkyMesh();
+sky.scale.setScalar( 10000 );  // Large enough to cover the scene
+scene.add( sky );
+```
+
+### SkyMesh Uniforms
+
+```javascript
+sky.turbidity.value = 10;         // Atmospheric haze (2-20)
+sky.rayleigh.value = 2;           // Blue sky scattering
+sky.mieCoefficient.value = 0.005; // Haze coefficient
+sky.mieDirectionalG.value = 0.8;  // Sun glow size
+```
+
+### SkyMesh Parameters Reference
+
+| Uniform | Range | Description |
+|---------|-------|-------------|
+| `turbidity` | 1-20 | Atmospheric haziness. Higher = more haze |
+| `rayleigh` | 0-4 | Rayleigh scattering. Higher = bluer sky |
+| `mieCoefficient` | 0-0.1 | Mie scattering intensity |
+| `mieDirectionalG` | 0-1 | Mie scattering directionality (sun glow) |
+| `sunPosition` | Vector3 | Position of the sun in world space |
+
+---
+
+## Sun Position Calculation
+
+Calculate sun position from elevation and azimuth angles:
+
+```javascript
+const sun = new THREE.Vector3();
+
+const parameters = {
+    elevation: 2,     // Degrees above horizon (0-90)
+    azimuth: 180      // Compass direction (-180 to 180)
+};
+
+function updateSun() {
+    // Convert angles to spherical coordinates
+    const phi = THREE.MathUtils.degToRad( 90 - parameters.elevation );
+    const theta = THREE.MathUtils.degToRad( parameters.azimuth );
+
+    // Calculate sun direction vector
+    sun.setFromSphericalCoords( 1, phi, theta );
+
+    // Update sky
+    sky.sunPosition.value.copy( sun );
+
+    // Update water
+    water.sunDirection.value.copy( sun ).normalize();
+}
+```
+
+**Spherical Coordinates:**
+- `phi` (polar angle): 0 = directly above, π/2 = horizon
+- `theta` (azimuthal angle): rotation around Y axis
+
+---
+
+## Environment Mapping
+
+Create environment maps from the sky for realistic reflections on objects:
+
+```javascript
+const pmremGenerator = new THREE.PMREMGenerator( renderer );
+const sceneEnv = new THREE.Scene();
+
+let renderTarget;
+
+function updateSun() {
+    // ... sun position calculation ...
+
+    // Clean up old render target
+    if ( renderTarget !== undefined ) {
+        renderTarget.dispose();
+    }
+
+    // Temporarily add sky to environment scene
+    sceneEnv.add( sky );
+
+    // Generate environment map
+    renderTarget = pmremGenerator.fromScene( sceneEnv );
+
+    // Move sky back to main scene
+    scene.add( sky );
+
+    // Apply environment to scene
+    scene.environment = renderTarget.texture;
+}
+```
+
+**Important:** The renderer must be initialized before generating PMREM:
+
+```javascript
+renderer.init().then( updateSun );
+```
+
+---
+
+## Adding Scene Objects
+
+### Basic Floating Object
+
+```javascript
+const geometry = new THREE.BoxGeometry( 30, 30, 30 );
+const material = new THREE.MeshStandardMaterial( { roughness: 0 } );
+const mesh = new THREE.Mesh( geometry, material );
+scene.add( mesh );
+```
+
+**Material Note:** Setting `roughness: 0` creates mirror-like reflections that show the environment map.
+
+---
+
+## Animation Loop
+
+```javascript
+function render() {
+    const time = performance.now() * 0.001;
+
+    // Animate object position
+    mesh.position.y = Math.sin( time ) * 20 + 5;
+    mesh.rotation.x = time * 0.5;
+    mesh.rotation.z = time * 0.51;
+
+    renderer.render( scene, camera );
+}
+
+renderer.setAnimationLoop( render );
+```
+
+**Note:** WaterMesh automatically animates its waves using the built-in `time` node - no manual update needed.
+
+---
+
+## Camera and Controls
+
+```javascript
+const camera = new THREE.PerspectiveCamera( 
+    55, 
+    window.innerWidth / window.innerHeight, 
+    1, 
+    20000 
+);
+camera.position.set( 30, 30, 100 );
+
+const controls = new OrbitControls( camera, renderer.domElement );
+controls.maxPolarAngle = Math.PI * 0.495;  // Prevent looking under water
+controls.target.set( 0, 10, 0 );
+controls.minDistance = 40.0;
+controls.maxDistance = 200.0;
+controls.update();
+```
+
+---
+
+## Window Resize Handler
+
+```javascript
+window.addEventListener( 'resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize( window.innerWidth, window.innerHeight );
+} );
+```
+
+---
+
+## Complete Implementation Checklist
+
+### Setup Phase
+
+- [ ] Import THREE from `three/webgpu`
+- [ ] Import `OrbitControls`, `WaterMesh`, `SkyMesh` from addons
+- [ ] Create WebGPURenderer with tone mapping
+- [ ] Create scene and perspective camera
+- [ ] Add OrbitControls
+
+### Water Setup
+
+- [ ] Create large PlaneGeometry (10000x10000)
+- [ ] Load water normal map with `RepeatWrapping`
+- [ ] Create WaterMesh with options
+- [ ] Rotate water to XZ plane (`rotation.x = -π/2`)
+- [ ] Add water to scene
+
+### Sky Setup
+
+- [ ] Create SkyMesh
+- [ ] Scale sky to cover scene (10000)
+- [ ] Configure turbidity, rayleigh, mie coefficients
+- [ ] Add sky to scene
+
+### Environment Setup
+
+- [ ] Create PMREMGenerator
+- [ ] Create separate environment scene
+- [ ] Initialize renderer before PMREM generation
+- [ ] Generate environment map from sky
+- [ ] Apply environment to scene
+
+### Sun Position
+
+- [ ] Create sun Vector3
+- [ ] Define elevation/azimuth parameters
+- [ ] Calculate phi/theta from angles
+- [ ] Update sky.sunPosition
+- [ ] Update water.sunDirection
+- [ ] Regenerate environment map on sun change
+
+### Scene Objects
+
+- [ ] Add meshes with appropriate materials
+- [ ] Use low roughness for reflective surfaces
+
+### Animation
+
+- [ ] Set up animation loop
+- [ ] Animate objects as needed
+- [ ] Call renderer.render()
+
+---
+
+## How WaterMesh Works (Under the Hood)
+
+The WaterMesh uses TSL (Three Shading Language) for its shader:
+
+### Wave Normal Generation
+
+```javascript
+// Multiple UV samples at different scales and offsets
+const uv0 = uv / 103 + vec2( time / 17, time / 29 );
+const uv1 = uv / 107 - vec2( time / -19, time / 31 );
+const uv2 = uv / vec2( 8907, 9803 ) + vec2( time / 101, time / 97 );
+const uv3 = uv / vec2( 1091, 1027 ) - vec2( time / 109, time / -113 );
+
+// Combine samples
+const noise = (sample0 + sample1 + sample2 + sample3) * 0.5 - 1;
+const surfaceNormal = normalize( noise.xzy * vec3(1.5, 1.0, 1.5) );
+```
+
+### Reflection with Fresnel
+
+```javascript
+// Fresnel effect - more reflection at grazing angles
+const theta = max( dot( eyeDirection, surfaceNormal ), 0 );
+const rf0 = 0.3;  // Base reflectivity
+const reflectance = pow( 1 - theta, 5 ) * (1 - rf0) + rf0;
+
+// Blend reflection with water color based on reflectance
+const albedo = mix( diffuseLight, mirrorReflection, reflectance );
+```
+
+---
+
+## How SkyMesh Works (Under the Hood)
+
+Based on the Preetham atmospheric scattering model:
+
+### Key Calculations
+
+1. **Sun Intensity**: Based on angle from zenith
+2. **Rayleigh Scattering**: Blue light scattering (sky color)
+3. **Mie Scattering**: Larger particle scattering (haze, sun glow)
+4. **Extinction**: Light absorption through atmosphere
+
+### Vertex Shader
+
+Calculates scattering coefficients and passes to fragment shader:
+
+```javascript
+// Rayleigh coefficient
+const vBetaR = totalRayleigh * rayleighCoefficient;
+
+// Mie coefficient
+const totalMie = 0.434 * (0.2 * turbidity * 10E-18) * MieConst;
+const vBetaM = totalMie * mieCoefficient;
+```
+
+### Fragment Shader
+
+Calculates final sky color:
+
+```javascript
+// Optical length through atmosphere
+const zenithAngle = acos( max( 0, dot( up, direction ) ) );
+
+// Combined extinction
+const Fex = exp( -(vBetaR * sR + vBetaM * sM) );
+
+// In-scattering
+const Lin = pow( sunE * (betaRTheta + betaMTheta) / (vBetaR + vBetaM) * (1 - Fex), 1.5 );
+```
+
+---
+
+## Performance Considerations
+
+1. **Reflection Resolution**: Lower `resolutionScale` (default 0.5) for better performance
+2. **Water Geometry**: Use minimal segments - normals come from the texture
+3. **Environment Updates**: Only regenerate PMREM when sun position changes
+4. **Tone Mapping Exposure**: Adjust to prevent overexposure artifacts
+
+---
+
+## Customization Ideas
+
+### Sunset/Sunrise
+```javascript
+parameters.elevation = 5;  // Low sun
+sky.turbidity.value = 20;  // More haze
+renderer.toneMappingExposure = 0.3;  // Darker overall
+```
+
+### Night Scene
+```javascript
+parameters.elevation = -5;  // Below horizon
+sky.rayleigh.value = 0.5;   // Less scattering
+```
+
+### Rough Seas
+```javascript
+water.distortionScale.value = 8;  // More distortion
+water.size.value = 2;              // Larger waves
+```
+
+### Calm Waters
+```javascript
+water.distortionScale.value = 1;  // Minimal distortion
+water.size.value = 0.5;           // Smaller, finer ripples
+```
+

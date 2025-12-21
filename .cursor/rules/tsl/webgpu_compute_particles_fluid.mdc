@@ -1,0 +1,369 @@
+---
+description: MLS-MPM fluid simulation running entirely in WebGPU compute shaders.
+alwaysApply: false
+---
+
+# WebGPU Compute Particles Fluid Simulation
+
+This recipe explains how to implement a real-time 3D fluid simulation using the **MLS-MPM (Moving Least Squares Material Point Method)** running entirely in WebGPU compute shaders with Three.js.
+
+## Overview
+
+This effect simulates fluid-like particle behavior where thousands of particles interact with each other and the environment, creating realistic fluid dynamics. The simulation runs on the GPU using compute shaders for maximum performance.
+
+**Key Technologies:**
+- Three.js WebGPU renderer
+- TSL (Three.js Shading Language) for compute shaders
+- MLS-MPM algorithm for fluid simulation
+- Instanced mesh rendering for particles
+
+## Architecture
+
+The simulation uses a **hybrid particle-grid approach**:
+
+1. **Particles** store position, velocity, and deformation gradient
+2. **Grid** acts as an intermediate computation buffer
+3. Each frame: Particles → Grid → Grid Update → Particles
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Particles  │────▶│    Grid     │────▶│ Grid Update │────▶│  Particles  │
+│  (P2G Pass) │     │  (Accumulate)│     │  (Physics)  │     │  (G2P Pass) │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+```
+
+## Core Components
+
+### 1. Configuration Constants
+
+```javascript
+const maxParticles = 8192 * 16;        // Maximum particle count (131,072)
+const gridSize1d = 64;                  // Grid resolution per axis
+const workgroupSize = 64;               // GPU workgroup size
+const gridSize = new THREE.Vector3(gridSize1d, gridSize1d, gridSize1d);
+const fixedPointMultiplier = 1e7;       // For atomic operations (WebGPU limitation)
+```
+
+### 2. Buffer Structures
+
+#### Particle Buffer
+Each particle stores:
+```javascript
+const particleStruct = struct({
+    position: { type: 'vec3' },    // World position (0-1 normalized)
+    velocity: { type: 'vec3' },    // Velocity vector
+    C: { type: 'mat3' },           // Affine momentum matrix (APIC)
+});
+// Total: 20 floats per particle (due to WebGPU alignment)
+```
+
+#### Cell Buffer (Grid)
+Each grid cell stores atomic integers (WebGPU doesn't support float atomics):
+```javascript
+const cellStruct = struct({
+    x: { type: 'int', atomic: true },    // Momentum X (fixed-point)
+    y: { type: 'int', atomic: true },    // Momentum Y (fixed-point)
+    z: { type: 'int', atomic: true },    // Momentum Z (fixed-point)
+    mass: { type: 'int', atomic: true }, // Accumulated mass (fixed-point)
+});
+```
+
+#### Cell Buffer Float
+For reading grid data after conversion:
+```javascript
+cellBufferFloat = instancedArray(cellCount, 'vec4'); // (vx, vy, vz, mass)
+```
+
+### 3. Fixed-Point Encoding
+
+WebGPU only supports integer atomics, so we encode floats:
+
+```javascript
+const encodeFixedPoint = (f32) => int(f32.mul(fixedPointMultiplier));
+const decodeFixedPoint = (i32) => float(i32).div(fixedPointMultiplier);
+```
+
+## Compute Shader Pipeline
+
+The simulation requires **5 compute kernels** executed each frame in order:
+
+### Kernel 1: Clear Grid
+
+Resets all grid cells to zero before particle transfer:
+
+```javascript
+clearGridKernel = Fn(() => {
+    If(instanceIndex.greaterThanEqual(uint(cellCount)), () => Return());
+    
+    atomicStore(cellBuffer.element(instanceIndex).get('x'), 0);
+    atomicStore(cellBuffer.element(instanceIndex).get('y'), 0);
+    atomicStore(cellBuffer.element(instanceIndex).get('z'), 0);
+    atomicStore(cellBuffer.element(instanceIndex).get('mass'), 0);
+})().compute(cellCount);
+```
+
+### Kernel 2: Particle to Grid (P2G) - Pass 1
+
+Transfers particle momentum and mass to grid using quadratic B-spline weights:
+
+```javascript
+p2g1Kernel = Fn(() => {
+    If(instanceIndex.greaterThanEqual(particleCountUniform), () => Return());
+    
+    const particlePosition = particleBuffer.element(instanceIndex).get('position');
+    const particleVelocity = particleBuffer.element(instanceIndex).get('velocity');
+    const C = particleBuffer.element(instanceIndex).get('C');
+    
+    const gridPosition = particlePosition.mul(gridSizeUniform);
+    const cellIndex = ivec3(gridPosition).sub(1);
+    
+    // Quadratic B-spline weights
+    const cellDiff = gridPosition.fract().sub(0.5);
+    const w0 = float(0.5).mul(float(0.5).sub(cellDiff)).mul(float(0.5).sub(cellDiff));
+    const w1 = float(0.75).sub(cellDiff.mul(cellDiff));
+    const w2 = float(0.5).mul(float(0.5).add(cellDiff)).mul(float(0.5).add(cellDiff));
+    const weights = array([w0, w1, w2]);
+    
+    // Scatter to 3x3x3 neighborhood
+    Loop({ start: 0, end: 3, type: 'int', name: 'gx' }, ({ gx }) => {
+        Loop({ start: 0, end: 3, type: 'int', name: 'gy' }, ({ gy }) => {
+            Loop({ start: 0, end: 3, type: 'int', name: 'gz' }, ({ gz }) => {
+                const weight = weights.element(gx).x.mul(weights.element(gy).y).mul(weights.element(gz).z);
+                const cellX = cellIndex.add(ivec3(gx, gy, gz));
+                const cellDist = vec3(cellX).add(0.5).sub(gridPosition);
+                const Q = C.mul(cellDist);  // APIC momentum transfer
+                
+                const massContrib = weight;
+                const velContrib = massContrib.mul(particleVelocity.add(Q));
+                
+                // Atomic accumulation (fixed-point)
+                atomicAdd(cell.get('x'), encodeFixedPoint(velContrib.x));
+                atomicAdd(cell.get('y'), encodeFixedPoint(velContrib.y));
+                atomicAdd(cell.get('z'), encodeFixedPoint(velContrib.z));
+                atomicAdd(cell.get('mass'), encodeFixedPoint(massContrib));
+            });
+        });
+    });
+})().compute(particleCount, [workgroupSize, 1, 1]);
+```
+
+### Kernel 3: Particle to Grid (P2G) - Pass 2
+
+Computes pressure and viscosity forces:
+
+```javascript
+p2g2Kernel = Fn(() => {
+    // ... similar setup ...
+    
+    // Compute local density
+    const density = float(0).toVar();
+    Loop(/* 3x3x3 neighborhood */, () => {
+        const mass = decodeFixedPoint(atomicLoad(cell.get('mass')));
+        density.addAssign(mass.mul(weight));
+    });
+    
+    // Equation of state (pressure)
+    const volume = float(1).div(density);
+    const pressure = max(0.0, pow(density.div(restDensityUniform), 5.0).sub(1).mul(stiffnessUniform));
+    
+    // Stress tensor (pressure + viscosity)
+    const stress = mat3(pressure.negate(), 0, 0, 0, pressure.negate(), 0, 0, 0, pressure.negate());
+    const strain = dudv.add(dudv.transpose());
+    stress.addAssign(strain.mul(dynamicViscosityUniform));
+    
+    // Apply force to grid
+    const eq16Term0 = volume.mul(-4).mul(stress).mul(dtUniform);
+    // ... scatter momentum contribution ...
+})().compute(particleCount, [workgroupSize, 1, 1]);
+```
+
+### Kernel 4: Update Grid
+
+Converts fixed-point to float and applies boundary conditions:
+
+```javascript
+updateGridKernel = Fn(() => {
+    const mass = decodeFixedPoint(atomicLoad(cell.get('mass')));
+    If(mass.lessThanEqual(0), () => Return());
+    
+    // Convert momentum to velocity
+    const vx = decodeFixedPoint(atomicLoad(cell.get('x'))).div(mass);
+    const vy = decodeFixedPoint(atomicLoad(cell.get('y'))).div(mass);
+    const vz = decodeFixedPoint(atomicLoad(cell.get('z'))).div(mass);
+    
+    // Boundary conditions (zero velocity at walls)
+    If(x.lessThan(1).or(x.greaterThan(gridSize.x - 2)), () => vx.assign(0));
+    If(y.lessThan(1).or(y.greaterThan(gridSize.y - 2)), () => vy.assign(0));
+    If(z.lessThan(1).or(z.greaterThan(gridSize.z - 2)), () => vz.assign(0));
+    
+    cellBufferFloat.element(instanceIndex).assign(vec4(vx, vy, vz, mass));
+})().compute(cellCount);
+```
+
+### Kernel 5: Grid to Particle (G2P)
+
+Transfers grid velocity back to particles:
+
+```javascript
+g2pKernel = Fn(() => {
+    const particlePosition = particleBuffer.element(instanceIndex).get('position').toVar();
+    const particleVelocity = vec3(0).toVar();
+    const B = mat3(0).toVar();  // For APIC
+    
+    // Gather from 3x3x3 neighborhood
+    Loop(/* 3x3x3 */, () => {
+        const weightedVelocity = cellBufferFloat.element(cellPtr).xyz.mul(weight);
+        const term = mat3(
+            weightedVelocity.mul(cellDist.x),
+            weightedVelocity.mul(cellDist.y),
+            weightedVelocity.mul(cellDist.z)
+        );
+        B.addAssign(term);
+        particleVelocity.addAssign(weightedVelocity);
+    });
+    
+    // Update APIC matrix
+    particleBuffer.element(instanceIndex).get('C').assign(B.mul(4));
+    
+    // Apply gravity
+    particleVelocity.addAssign(gravityUniform.mul(dtUniform));
+    
+    // Mouse interaction
+    const dist = cross(mouseRayDirection, particlePosition.sub(mouseRayOrigin)).length();
+    const force = dist.mul(3.0).oneMinus().max(0.0).pow(2);
+    particleVelocity.addAssign(mouseForce.mul(force));
+    
+    // Advect position
+    particlePosition.addAssign(particleVelocity.mul(dtUniform));
+    
+    // Clamp to bounds
+    particlePosition.assign(clamp(particlePosition, minBound, maxBound));
+    
+    // Store results
+    particleBuffer.element(instanceIndex).get('position').assign(particlePosition);
+    particleBuffer.element(instanceIndex).get('velocity').assign(particleVelocity);
+})().compute(particleCount, [workgroupSize, 1, 1]);
+```
+
+## Rendering
+
+Particles are rendered using instanced meshes with a custom position node:
+
+```javascript
+const geometry = BufferGeometryUtils.mergeVertices(
+    new THREE.IcosahedronGeometry(0.008, 1)
+);
+
+const material = new THREE.MeshStandardNodeMaterial({ color: '#0066FF' });
+
+material.positionNode = Fn(() => {
+    const particlePosition = particleBuffer.element(instanceIndex).get('position');
+    return attribute('position').add(particlePosition);
+})();
+
+particleMesh = new THREE.Mesh(geometry, material);
+particleMesh.count = particleCount;
+particleMesh.frustumCulled = false;
+```
+
+## Simulation Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `particleCount` | 32,768 | Number of simulated particles |
+| `stiffness` | 50 | Pressure response strength |
+| `restDensity` | 1.5 | Target fluid density |
+| `dynamicViscosity` | 0.1 | Fluid thickness/resistance |
+| `gravity` | (0, -96.2, 0) | Gravity acceleration |
+| `dt` | 1/60 | Time step (clamped) |
+
+## Render Loop
+
+```javascript
+async function render() {
+    const deltaTime = THREE.MathUtils.clamp(clock.getDelta(), 0.00001, 1/60);
+    dtUniform.value = deltaTime;
+    
+    // Update mouse force
+    mouseForceUniform.value.copy(mouseCoord).sub(prevMouseCoord).multiplyScalar(2);
+    
+    // Execute compute pipeline
+    renderer.compute(workgroupKernel);           // Update dispatch counts
+    renderer.compute(clearGridKernel);            // 1. Clear grid
+    renderer.compute(p2g1Kernel, workgroupBuffer);// 2. P2G momentum
+    renderer.compute(p2g2Kernel, workgroupBuffer);// 3. P2G forces
+    renderer.compute(updateGridKernel);           // 4. Grid update
+    renderer.compute(g2pKernel, workgroupBuffer); // 5. G2P
+    
+    renderer.render(scene, camera);
+}
+```
+
+## Key Implementation Notes
+
+### 1. Indirect Dispatch for Dynamic Particle Count
+```javascript
+// Buffer storing dispatch dimensions
+const workgroupBuffer = new THREE.IndirectStorageBufferAttribute(
+    new Uint32Array([numWorkgroups, 1, 1]), 1
+);
+
+// Kernel to update workgroup count dynamically
+workgroupKernel = Fn(() => {
+    const workgroupsToDispatch = particleCountUniform.sub(1).div(workgroupSize).add(1);
+    workgroupStorage.element(0).assign(workgroupsToDispatch);
+})().compute(1);
+```
+
+### 2. Quadratic B-Spline Weights
+The 3x3x3 stencil uses quadratic B-spline interpolation:
+```
+w0 = 0.5 * (0.5 - d)²
+w1 = 0.75 - d²
+w2 = 0.5 * (0.5 + d)²
+```
+where `d` is the fractional distance from cell center.
+
+### 3. APIC (Affine Particle-In-Cell)
+The `C` matrix captures local velocity gradients, improving angular momentum conservation and reducing numerical dissipation compared to standard PIC.
+
+### 4. Rounded Box Containment
+Particles are constrained to a rounded box shape:
+```javascript
+const clampToRoundedBox = (pos, box, radius) => {
+    const result = pos.sub(0.5);
+    const pp = step(box, result.abs()).mul(result.add(box.negate().mul(result.sign())));
+    const dist = pp.length().sub(radius);
+    If(dist.greaterThan(0.0), () => {
+        result.subAssign(pp.normalize().mul(dist).mul(1.3));
+    });
+    return result.add(0.5);
+};
+```
+
+## Performance Considerations
+
+1. **Workgroup Size**: 64 threads is optimal for most GPUs
+2. **Grid Resolution**: 64³ balances accuracy vs memory/compute
+3. **Fixed-Point Precision**: 1e7 multiplier provides ~7 decimal digits
+4. **Mesh Optimization**: Use `mergeVertices()` to reduce vertex count
+5. **Frustum Culling**: Disabled since particles span the entire volume
+
+## Dependencies
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { Fn, If, Return, instancedArray, instanceIndex, uniform, 
+         attribute, uint, float, clamp, struct, atomicStore, int, 
+         ivec3, array, vec3, atomicAdd, Loop, atomicLoad, max, 
+         pow, mat3, vec4, cross, step, storage } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+```
+
+## References
+
+- [MLS-MPM Paper](https://www.math.ucla.edu/~cffjiang/research/mpmcourse/mpmcourse.pdf)
+- [WebGPU-Ocean Implementation](https://github.com/matsuoka-601/WebGPU-Ocean)
+- [APIC Method](https://dl.acm.org/doi/10.1145/2766996)
+
