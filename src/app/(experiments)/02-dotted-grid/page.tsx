@@ -164,19 +164,32 @@ function DottedGrid() {
       const backgroundFn = (uvCoord: any) =>
         mix(bgColor1, bgColor2, uvCoord.x.add(uvCoord.y).mul(0.5));
 
-      // Aspect-corrected UV for square grid cells
-      const aspectCorrectedUv = vec2(uv().x.mul(uniforms.aspect), uv().y);
+      // === Pixelated UV Calculation ===
+      // yDivisions = how many cells vertically (fixed = gridScale)
+      const yDivisions = uniforms.gridScale;
+      // xDivisions = exact calculation for perfectly square cells
+      const xDivisions = yDivisions.mul(uniforms.aspect);
 
-      // Grid UV and cell center calculation
-      const scaledUv = aspectCorrectedUv.mul(uniforms.gridScale);
-      const cellId = floor(scaledUv);
-      const cellCenter = cellId.add(0.5).div(uniforms.gridScale);
-      // Convert cell center back to raw UV space for background sampling
-      const cellCenterRaw = vec2(cellCenter.x.div(uniforms.aspect), cellCenter.y);
-      const gridUv = fract(scaledUv).sub(0.5);
+      // Center the X axis so overflow is split evenly between left and right
+      // offset = (1 - fract(xDivisions)) * 0.5 / xDivisions
+      const xOffset = float(1).sub(fract(xDivisions)).mul(0.5).div(xDivisions);
+      const centeredUvX = uv().x.add(xOffset);
+
+      // cellIndex = which cell we're in (integer coordinates)
+      const cellIndex = floor(
+        vec2(centeredUvX.mul(xDivisions), uv().y.mul(yDivisions))
+      );
+
+      // cellCenterUV = UV that samples from the center of each cell
+      const cellCenterUV = cellIndex.add(0.5).div(vec2(xDivisions, yDivisions));
+
+      // gridUv for the dot SDF (local UV within cell, -0.5 to 0.5)
+      const gridUv = fract(
+        vec2(centeredUvX.mul(xDivisions), uv().y.mul(yDivisions))
+      ).sub(0.5);
 
       // Sample background at cell center (pixelation effect)
-      const cellColor = backgroundFn(cellCenterRaw);
+      const cellColor = backgroundFn(cellCenterUV);
 
       // Dot SDF with animated size
       const pulse = float(1).add(uniforms.time.mul(2).sin().mul(0.1));
