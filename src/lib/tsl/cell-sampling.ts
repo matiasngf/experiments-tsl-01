@@ -1,3 +1,5 @@
+import MathNode from "three/src/nodes/math/MathNode.js";
+import OperatorNode from "three/src/nodes/math/OperatorNode.js";
 import { uv, float, fract, floor, vec2 } from "three/tsl";
 import { Node } from "three/webgpu";
 
@@ -7,15 +9,15 @@ import { Node } from "three/webgpu";
  */
 export interface CellSamplingResult {
   /** Integer cell coordinates (which cell we're in) */
-  cellIndex: Node;
+  cellIndex: MathNode;
   /** UV that samples from the center of each cell (for pixelation effects) */
-  cellCenterUV: Node;
+  cellCenterUV: OperatorNode;
   /** Local UV within cell, ranging from -0.5 to 0.5 (for SDF shapes) */
-  localUV: Node;
+  localUV: OperatorNode;
   /** Number of cells horizontally (fractional, for perfect squares) */
-  xDivisions: Node;
+  xDivisions: OperatorNode | Node;
   /** Number of cells vertically (same as input yDivisions) */
-  yDivisions: Node;
+  yDivisions: OperatorNode | Node;
 }
 
 /**

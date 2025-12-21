@@ -3,14 +3,15 @@
 
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
-import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
-import { uv, float, smoothstep, color, mix, renderOutput } from "three/tsl";
+import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
+import { uv, float, smoothstep, mix, renderOutput, hash, vec3, mx_worley_noise_vec2, mx_worley_noise_float } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
 import { useControls } from "leva";
 import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
 import { useUniforms, useMaterial, cellSampling } from "@/lib/tsl";
+import { mx_perlin_noise_float } from "three/src/nodes/materialx/lib/mx_noise.js";
 
 export default function DottedGridPage() {
   return (
@@ -135,12 +136,14 @@ function DottedGrid() {
   const material = useMaterial(
     MeshBasicNodeMaterial,
     (mat) => {
-      // Background gradient function (uses raw UV for smooth gradient)
-      const bgColor1 = color(0x8b5cf6); // violet-500
-      const bgColor2 = color(0xd946ef); // fuchsia-500
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const backgroundFn = (uvCoord: any) =>
-        mix(bgColor1, bgColor2, uvCoord.x.add(uvCoord.y).mul(0.5));
+      // Background with small noise for debugging
+       
+      const backgroundFn = (uvCoord: Node) => {
+        // 2D hash: combine x and y with a prime to break correlation
+        const scaledUv = uvCoord.mul(100);
+        const noise2d = mx_worley_noise_float(scaledUv)
+        return vec3(0.1).add(noise2d); // neutral gray + noise
+      };
 
       // Cell sampling for pixelated grid with perfectly square cells
       const { cellCenterUV, localUV } = cellSampling(
