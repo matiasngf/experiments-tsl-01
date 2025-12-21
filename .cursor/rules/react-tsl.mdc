@@ -1,0 +1,542 @@
+---
+description: Guidelines and patterns for efficient, high-performance TSL (Three.js Shading Language) development in React projects with WebGPU, focusing on minimizing re-renders, optimizing material usage, and leveraging custom hooks for resource management.
+alwaysApply: false
+---
+
+# React TSL Performance Patterns
+
+A key to creating performant WebGPU applications is to avoid re-rendering and re-creating objects.
+
+This project contains the following TSL utilities in `@/lib/tsl`:
+
+## useUniforms
+
+Creates memoized TSL uniform nodes from initial values. Unlike WebGL's `useUniforms` which wraps values in `{ value: T }` objects, this hook takes plain values and creates TSL `uniform()` nodes automatically.
+
+```tsx
+import { useUniforms } from "@/lib/tsl";
+import { Color, Vector2 } from "three";
+
+function MyMesh() {
+  const uniforms = useUniforms({
+    time: 0,
+    intensity: 1.5,
+    baseColor: new Color(0xff0000),
+    resolution: new Vector2(1920, 1080),
+  });
+
+  // Update uniforms each frame
+  useFrame(({ clock }) => {
+    uniforms.time.value = clock.elapsedTime;
+  });
+
+  // Use uniform nodes in TSL material
+  const material = useMemo(() => {
+    const mat = new MeshBasicNodeMaterial();
+    mat.colorNode = uniforms.baseColor.mul(uniforms.intensity);
+    return mat;
+  }, [uniforms]);
+
+  return <mesh material={material}><boxGeometry /></mesh>;
+}
+```
+
+**Supported types:** `number`, `Color`, `Vector2`, `Vector3`, `Vector4`, `Matrix3`, `Matrix4`
+
+---
+
+## useMaterial
+
+Creates a memoized NodeMaterial with a setup callback. The material is created once and the setup function configures its node properties.
+
+```tsx
+import { useMaterial } from "@/lib/tsl";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import { color, uv, mix } from "three/tsl";
+
+function GradientMesh() {
+  const material = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    const red = color(0xff0000);
+    const blue = color(0x0000ff);
+    mat.colorNode = mix(red, blue, uv().x);
+  });
+
+  return <mesh material={material}><planeGeometry /></mesh>;
+}
+```
+
+### With Uniforms
+
+Combine with `useUniforms` for dynamic updates. Pass uniforms as a dependency to ensure proper memoization:
+
+```tsx
+const uniforms = useUniforms({ progress: 0, time: 0 });
+
+const material = useMaterial(
+  MeshPhysicalNodeMaterial,
+  (mat) => {
+    mat.colorNode = mix(color(0xff0000), color(0x0000ff), uniforms.progress);
+    mat.roughnessNode = uniforms.time.sin().mul(0.5).add(0.5);
+  },
+  [uniforms] // Dependencies - recreate if uniforms reference changes
+);
+
+useFrame(({ clock }) => {
+  uniforms.time.value = clock.elapsedTime;
+});
+```
+
+---
+
+## useRenderTarget
+
+Creates a WebGPU-compatible RenderTarget with automatic resizing. Uses Three.js's WebGPU `RenderTarget` class.
+
+```tsx
+import { useRenderTarget } from "@/lib/tsl";
+import { FloatType } from "three";
+
+// Matches viewport size automatically
+const renderTarget = useRenderTarget({});
+
+// Fixed size with options
+const fixedTarget = useRenderTarget({
+  width: 1024,
+  height: 1024,
+  type: FloatType,
+  samples: 4,
+});
+
+useFrame(({ gl, scene, camera }) => {
+  gl.setRenderTarget(renderTarget);
+  gl.render(scene, camera);
+  gl.setRenderTarget(null);
+});
+```
+
+---
+
+## useDoubleFbo
+
+Creates a double-buffered FBO (ping-pong buffer) for GPU computations. Essential for simulations, particle systems, or effects that read from the previous frame.
+
+```tsx
+import { useDoubleFbo } from "@/lib/tsl";
+import { FloatType, NearestFilter } from "three";
+
+const doubleFbo = useDoubleFbo({
+  width: 512,
+  height: 512,
+  type: FloatType,
+  minFilter: NearestFilter,
+  magFilter: NearestFilter,
+});
+
+useFrame(({ gl, scene, camera }) => {
+  // Read from previous frame
+  uniforms.previousFrame.value = doubleFbo.read.texture;
+  
+  // Render to current frame
+  gl.setRenderTarget(doubleFbo.write);
+  gl.render(scene, camera);
+  gl.setRenderTarget(null);
+  
+  // Swap buffers for next frame
+  doubleFbo.swap();
+});
+```
+
+**Properties:**
+- `doubleFbo.read` - RenderTarget with previous frame data
+- `doubleFbo.write` - RenderTarget for current frame
+- `doubleFbo.texture` - Shorthand for `read.texture`
+- `doubleFbo.swap()` - Swap read/write buffers
+
+---
+
+## quads
+
+Utilities for fullscreen quad rendering. Use these for post-processing or fullscreen shader effects.
+
+```tsx
+import { quadGeometry, quadCamera } from "@/lib/tsl";
+import { Mesh } from "three";
+
+// Create a fullscreen quad mesh
+const quadMesh = new Mesh(quadGeometry, myMaterial);
+
+// Render to a target
+gl.setRenderTarget(target);
+gl.render(quadMesh, quadCamera);
+gl.setRenderTarget(null);
+```
+
+---
+
+## useQuadShader
+
+Hook for rendering a fullscreen quad with a NodeMaterial, optionally to a render target. Commonly used for postprocessing, compute-like effects, or rendering to texture.
+
+```tsx
+import { useQuadShader, useRenderTarget, useMaterial } from "@/lib/tsl";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import { color, uv, mix } from "three/tsl";
+
+function EffectPass() {
+  const renderTarget = useRenderTarget({ width: 512, height: 512 });
+
+  const material = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    mat.colorNode = mix(color(0xff0000), color(0x0000ff), uv().x);
+  });
+
+  // Auto-renders each frame to the render target
+  useQuadShader({
+    material,
+    renderTarget,
+  });
+
+  // Use renderTarget.texture elsewhere
+  return <mesh><planeGeometry /><meshBasicMaterial map={renderTarget.texture} /></mesh>;
+}
+```
+
+### Manual Render Mode
+
+For ping-pong operations or custom render timing:
+
+```tsx
+const api = useQuadShader({
+  material: feedbackMaterial,
+  renderTarget: doubleFbo.write,
+  autoRender: false, // Disable auto-render
+});
+
+useFrame((_, delta) => {
+  // Update uniforms
+  uniforms.time.value += delta;
+  
+  // Manually render
+  api.render(delta);
+  
+  // Swap buffers
+  doubleFbo.swap();
+});
+```
+
+### Render to Screen
+
+Pass `null` as renderTarget to render directly to screen:
+
+```tsx
+useQuadShader({
+  material: postProcessMaterial,
+  renderTarget: null, // Renders to screen
+});
+```
+
+**Options:**
+- `material` - The NodeMaterial to apply to the quad
+- `renderTarget` - RenderTarget, ref, or null (screen)
+- `autoRender` - Auto-render each frame (default: true)
+- `priority` - Render loop priority
+- `clear` - Clear before rendering (default: true)
+- `beforeRender` / `afterRender` - Lifecycle callbacks
+
+---
+
+## Material Hook Pattern
+
+For complex materials, create dedicated hooks that encapsulate the material setup:
+
+```tsx
+// hooks/use-glass-material.ts
+import { useMaterial, useUniforms } from "@/lib/tsl";
+import { MeshPhysicalNodeMaterial } from "three/webgpu";
+import { color, uv, mx_fractal_noise_float, vec3 } from "three/tsl";
+
+interface GlassMaterialProps {
+  tint?: number;
+}
+
+export function useGlassMaterial({ tint = 0xffffff }: GlassMaterialProps = {}) {
+  const uniforms = useUniforms({
+    tintColor: new Color(tint),
+    time: 0,
+  });
+
+  const material = useMaterial(
+    MeshPhysicalNodeMaterial,
+    (mat) => {
+      mat.colorNode = uniforms.tintColor;
+      mat.roughnessNode = mx_fractal_noise_float(
+        vec3(uv().mul(10), uniforms.time.mul(0.1))
+      ).mul(0.3);
+      mat.transmission = 0.9;
+      mat.thickness = 0.5;
+    },
+    [uniforms]
+  );
+
+  return { material, uniforms };
+}
+
+// Usage
+function GlassCube() {
+  const { material, uniforms } = useGlassMaterial({ tint: 0x88ccff });
+
+  useFrame(({ clock }) => {
+    uniforms.time.value = clock.elapsedTime;
+  });
+
+  return <mesh material={material}><boxGeometry /></mesh>;
+}
+```
+
+---
+
+## Rendering Patterns
+
+### Custom Render Pass Hook
+
+When you need to render a shader into a texture, create a hook with complete render setup:
+
+```tsx
+// hooks/use-feedback-pass.ts
+import { useDoubleFbo, useUniforms, useMaterial, quadGeometry, quadCamera } from "@/lib/tsl";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import { texture, mix, uv } from "three/tsl";
+import { Mesh } from "three";
+import { useCallback, useMemo } from "react";
+import type { RootState } from "@react-three/fiber";
+
+export function useFeedbackPass() {
+  const doubleFbo = useDoubleFbo({ width: 512, height: 512 });
+  
+  const uniforms = useUniforms({
+    fadeAmount: 0.98,
+  });
+
+  const feedbackMaterial = useMaterial(
+    MeshBasicNodeMaterial,
+    (mat) => {
+      const prevFrame = texture(doubleFbo.read.texture, uv());
+      mat.colorNode = prevFrame.mul(uniforms.fadeAmount);
+    },
+    [doubleFbo, uniforms]
+  );
+
+  const mesh = useMemo(
+    () => new Mesh(quadGeometry, feedbackMaterial),
+    [feedbackMaterial]
+  );
+
+  const render = useCallback(
+    (state: RootState) => {
+      const { gl } = state;
+      
+      gl.setRenderTarget(doubleFbo.write);
+      gl.render(mesh, quadCamera);
+      gl.setRenderTarget(null);
+      
+      doubleFbo.swap();
+    },
+    [mesh, doubleFbo]
+  );
+
+  return { render, texture: doubleFbo.texture, uniforms };
+}
+```
+
+---
+
+## TSL Node Patterns
+
+### Creating Reusable Fn Functions
+
+Use `Fn` to create reusable shader functions:
+
+```tsx
+import { Fn, float, smoothstep, uv, vec2, length } from "three/tsl";
+import type { Node } from "three/webgpu";
+
+// Vignette effect
+export const vignetteFn = Fn(([intensity]: [Node]) => {
+  const coords = uv().sub(0.5).mul(2.0); // -1 to 1
+  const dist = length(coords);
+  return smoothstep(intensity, intensity.sub(0.3), dist);
+});
+
+// Circle SDF
+export const circleSdf = Fn(([p, r]: [Node, Node]) => {
+  return length(p).sub(r);
+});
+
+// Usage in material
+mat.colorNode = baseColor.mul(vignetteFn(float(0.8)));
+```
+
+### Returning Multiple Values with Struct
+
+```tsx
+import { Fn, struct, float, vec3, smoothstep, step } from "three/tsl";
+import type { Node } from "three/webgpu";
+
+const EffectResult = struct(
+  {
+    opacity: "float",
+    emissive: "float",
+    debug: "vec3",
+  },
+  "EffectResult"
+);
+
+export const effectFn = Fn(([progress]: [Node]) => {
+  const opacity = smoothstep(float(0), float(1), progress);
+  const emissive = step(progress, float(0.5)).mul(0.5);
+  const debug = vec3(progress, opacity, emissive);
+
+  return EffectResult(opacity, emissive, debug);
+});
+
+// Usage
+const result = effectFn(uniforms.progress);
+mat.opacityNode = result.get("opacity");
+mat.emissiveNode = result.get("emissive");
+```
+
+---
+
+## Common TSL Imports
+
+```tsx
+// Core TSL
+import {
+  uniform,
+  color,
+  vec2,
+  vec3,
+  vec4,
+  float,
+  uv,
+  time,
+  Fn,
+  struct,
+  texture,
+} from "three/tsl";
+
+// Math operations
+import {
+  mix,
+  smoothstep,
+  step,
+  clamp,
+  abs,
+  sign,
+  length,
+  normalize,
+  dot,
+  pow,
+  sqrt,
+  sin,
+  cos,
+  fract,
+} from "three/tsl";
+
+// Noise
+import { mx_fractal_noise_float, mx_noise_float } from "three/tsl";
+
+// Conditionals
+import { If, Else, select, Discard } from "three/tsl";
+
+// Geometry
+import { positionWorld, positionLocal, normalWorld, normalLocal } from "three/tsl";
+
+// Materials
+import {
+  MeshBasicNodeMaterial,
+  MeshPhysicalNodeMaterial,
+  MeshStandardNodeMaterial,
+  Node,
+} from "three/webgpu";
+```
+
+---
+
+## Key Differences from WebGL
+
+| Aspect | WebGL | TSL |
+|--------|-------|-----|
+| Uniforms | `{ value: T }` objects | `uniform(T)` nodes |
+| Material | `ShaderMaterial` with GLSL strings | `NodeMaterial` with TSL nodes |
+| Color ops | GLSL: `vec3 * float` | TSL: `color.mul(float)` |
+| Update | `uniform.value = x` | Same: `uniformNode.value = x` |
+| Render target | `WebGLRenderTarget` | `RenderTarget` (from `three/webgpu`) |
+
+---
+
+## Page Structure
+
+The recommended structure for TSL pages:
+
+```tsx
+"use client";
+
+import { Canvas } from "@react-three/fiber";
+import { Suspense } from "react";
+import { WebGPURenderer } from "three/webgpu";
+
+export default function Page() {
+  return (
+    <div className="w-screen h-screen">
+      <Canvas
+        gl={async (props) => {
+          const renderer = new WebGPURenderer(props as never);
+          await renderer.init();
+          return renderer;
+        }}
+      >
+        <Suspense fallback={null}>
+          <Scene />
+        </Suspense>
+      </Canvas>
+    </div>
+  );
+}
+
+function Scene() {
+  return (
+    <>
+      <ambientLight intensity={0.5} />
+      <MyMesh />
+    </>
+  );
+}
+```
+
+---
+
+## Postprocessing
+
+For postprocessing setup with TSL, refer to:
+- `tsl_postprocessing.mdc` - Effect reference and custom passes
+- `tsl_postprocessing_react.mdc` - React integration patterns
+
+Basic pattern using existing hooks:
+
+```tsx
+import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
+import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
+import { renderOutput } from "three/tsl";
+
+function Scene() {
+  const { postProcessing, scenePass } = usePostProcessing({ enabled: true });
+  const { bloomNode } = useBloomPass(scenePass, { strength: 0.7 });
+
+  useEffect(() => {
+    const sceneColor = scenePass.getTextureNode("output");
+    postProcessing.outputNode = renderOutput(sceneColor.add(bloomNode));
+  }, [postProcessing, scenePass, bloomNode]);
+
+  return <>{/* scene content */}</>;
+}
+```

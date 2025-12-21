@@ -18,5 +18,7 @@
     "lib": "@/lib",
     "hooks": "@/hooks"
   },
-  "registries": {}
+  "registries": {
+    "@glcn": "https://glcn.dev/r/webgl/{name}.json"
+  }
 }
