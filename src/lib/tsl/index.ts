@@ -19,3 +19,7 @@ export {
   createQuadCamera,
 } from "./quads";
 
+// TSL Functions
+export { cellSampling } from "./cell-sampling";
+export type { CellSamplingResult } from "./cell-sampling";
+

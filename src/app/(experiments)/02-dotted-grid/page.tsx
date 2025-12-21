@@ -4,23 +4,13 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
-import {
-  uv,
-  float,
-  fract,
-  floor,
-  smoothstep,
-  color,
-  mix,
-  renderOutput,
-  vec2,
-} from "three/tsl";
+import { uv, float, smoothstep, color, mix, renderOutput } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
 import { useControls } from "leva";
 import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
-import { useUniforms, useMaterial } from "@/lib/tsl";
+import { useUniforms, useMaterial, cellSampling } from "@/lib/tsl";
 
 export default function DottedGridPage() {
   return (
@@ -164,29 +154,11 @@ function DottedGrid() {
       const backgroundFn = (uvCoord: any) =>
         mix(bgColor1, bgColor2, uvCoord.x.add(uvCoord.y).mul(0.5));
 
-      // === Pixelated UV Calculation ===
-      // yDivisions = how many cells vertically (fixed = gridScale)
-      const yDivisions = uniforms.gridScale;
-      // xDivisions = exact calculation for perfectly square cells
-      const xDivisions = yDivisions.mul(uniforms.aspect);
-
-      // Center the X axis so overflow is split evenly between left and right
-      // offset = (1 - fract(xDivisions)) * 0.5 / xDivisions
-      const xOffset = float(1).sub(fract(xDivisions)).mul(0.5).div(xDivisions);
-      const centeredUvX = uv().x.add(xOffset);
-
-      // cellIndex = which cell we're in (integer coordinates)
-      const cellIndex = floor(
-        vec2(centeredUvX.mul(xDivisions), uv().y.mul(yDivisions))
+      // Cell sampling for pixelated grid with perfectly square cells
+      const { cellCenterUV, localUV } = cellSampling(
+        uniforms.gridScale,
+        uniforms.aspect
       );
-
-      // cellCenterUV = UV that samples from the center of each cell
-      const cellCenterUV = cellIndex.add(0.5).div(vec2(xDivisions, yDivisions));
-
-      // gridUv for the dot SDF (local UV within cell, -0.5 to 0.5)
-      const gridUv = fract(
-        vec2(centeredUvX.mul(xDivisions), uv().y.mul(yDivisions))
-      ).sub(0.5);
 
       // Sample background at cell center (pixelation effect)
       const cellColor = backgroundFn(cellCenterUV);
@@ -194,7 +166,7 @@ function DottedGrid() {
       // Dot SDF with animated size
       const pulse = float(1).add(uniforms.time.mul(2).sin().mul(0.1));
       const radius = uniforms.dotSize.mul(0.5).mul(pulse);
-      const dist = gridUv.length();
+      const dist = localUV.length();
       const dot = smoothstep(radius, radius.sub(0.05), dist);
 
       // Conditional output: debug shows raw background, normal shows dots
