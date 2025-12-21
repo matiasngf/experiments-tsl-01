@@ -1,24 +1,26 @@
 /* eslint-disable react-hooks/immutability */
 "use client";
 
-import { Canvas, useFrame } from "@react-three/fiber";
-import { Suspense, useMemo, useEffect } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
 import {
   uv,
   float,
   fract,
+  floor,
   smoothstep,
-  uniform,
   color,
   mix,
   renderOutput,
+  vec2,
 } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
 import { useControls } from "leva";
 import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
+import { useUniforms, useMaterial } from "@/lib/tsl";
 
 export default function DottedGridPage() {
   return (
@@ -51,10 +53,9 @@ function Scene() {
 
   const { bloomNode } = useBloomPass(scenePass, {
     strength: 0.7,
-    threshold: 0.5,
+    threshold: 0.2,
     radius: 0.2,
   });
-
 
   // Chain postprocessing passes
   useEffect(() => {
@@ -70,30 +71,69 @@ function Scene() {
 }
 
 function DottedGrid() {
-  // TSL uniforms for animation
-  const dotSize = useMemo(() => uniform(0.3), []);
-  const gridScale = useMemo(() => uniform(20), []);
-  const time = useMemo(() => uniform(0), []);
-  const reveal = useMemo(() => uniform(0), []);
+  const { viewport } = useThree();
+
+  const aspect = viewport.width / viewport.height;
+
+  // TSL uniforms using useUniforms hook
+  const uniforms = useUniforms({
+    time: 0,
+    reveal: 0,
+    dotSize: 0.8,
+    gridScale: 20,
+    debugBackground: 0,
+    aspect: aspect,
+  });
+
+  // Leva controls with onChange for direct uniform updates
+  useControls({
+    debugBackground: {
+      value: false,
+      label: "Debug Background",
+      onChange: (v: boolean) => {
+        uniforms.debugBackground.value = v ? 1 : 0;
+      },
+    },
+    dotSize: {
+      value: 0.8,
+      min: 0,
+      max: 1,
+      step: 0.01,
+      label: "Dot Size",
+      onChange: (v: number) => {
+        uniforms.dotSize.value = v;
+      },
+    },
+    gridScale: {
+      value: 20,
+      min: 2,
+      max: 50,
+      step: 1,
+      label: "Grid Scale",
+      onChange: (v: number) => {
+        uniforms.gridScale.value = v;
+      },
+    },
+  });
 
   // Anime.js for smooth animations
   const scope = useAnime({
     methods: {
       reveal: () => {
-        animate(reveal, {
+        animate(uniforms.reveal, {
           value: 1,
           duration: 2000,
           ease: cubicBezier(0.25, 0.1, 0.25, 1),
         });
-        animate(gridScale, {
+        animate(uniforms.gridScale, {
           value: 20,
           duration: 2500,
           ease: cubicBezier(0.25, 0.1, 0.25, 1),
         });
       },
       pulse: () => {
-        animate(dotSize, {
-          value: [0.3, 0.5, 0.3],
+        animate(uniforms.dotSize, {
+          value: [0.8, 1, 0.8],
           duration: 1000,
           ease: "easeInOutQuad",
         });
@@ -103,55 +143,64 @@ function DottedGrid() {
 
   // Trigger reveal on mount
   useEffect(() => {
-    gridScale.value = 5;
+    uniforms.gridScale.value = 5;
     scope.methods.reveal();
-  }, [scope, gridScale]);
+  }, [scope, uniforms]);
 
-  // Update time uniform each frame
+  // Update time and aspect uniforms each frame
   useFrame((state) => {
-    time.value = state.clock.elapsedTime;
+    uniforms.time.value = state.clock.elapsedTime;
+    uniforms.aspect.value = state.viewport.width / state.viewport.height;
   });
 
-  // Create dotted grid material with TSL
-  const material = useMemo(() => {
-    const mat = new MeshBasicNodeMaterial();
+  // Create dotted grid material with TSL using useMaterial hook
+  const material = useMaterial(
+    MeshBasicNodeMaterial,
+    (mat) => {
+      // Background gradient function (uses raw UV for smooth gradient)
+      const bgColor1 = color(0x8b5cf6); // violet-500
+      const bgColor2 = color(0xd946ef); // fuchsia-500
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const backgroundFn = (uvCoord: any) =>
+        mix(bgColor1, bgColor2, uvCoord.x.add(uvCoord.y).mul(0.5));
 
-    // Grid UV coordinates
-    const scaledUv = uv().mul(gridScale);
-    const gridUv = fract(scaledUv).sub(0.5);
+      // Aspect-corrected UV for square grid cells
+      const aspectCorrectedUv = vec2(uv().x.mul(uniforms.aspect), uv().y);
 
-    // Distance from center of each cell
-    const dist = gridUv.length();
+      // Grid UV and cell center calculation
+      const scaledUv = aspectCorrectedUv.mul(uniforms.gridScale);
+      const cellId = floor(scaledUv);
+      const cellCenter = cellId.add(0.5).div(uniforms.gridScale);
+      // Convert cell center back to raw UV space for background sampling
+      const cellCenterRaw = vec2(cellCenter.x.div(uniforms.aspect), cellCenter.y);
+      const gridUv = fract(scaledUv).sub(0.5);
 
-    // Animated dot size with subtle time-based pulse
-    const pulse = float(1).add(time.mul(2).sin().mul(0.1));
-    const animatedDotSize = dotSize.mul(pulse);
+      // Sample background at cell center (pixelation effect)
+      const cellColor = backgroundFn(cellCenterRaw);
 
-    // Create dot with smooth edges
-    const dot = smoothstep(animatedDotSize, animatedDotSize.sub(0.05), dist);
+      // Dot SDF with animated size
+      const pulse = float(1).add(uniforms.time.mul(2).sin().mul(0.1));
+      const radius = uniforms.dotSize.mul(0.5).mul(pulse);
+      const dist = gridUv.length();
+      const dot = smoothstep(radius, radius.sub(0.05), dist);
 
-    // Color gradient based on position
-    const baseColor = color(0x8b5cf6); // violet-500
-    const glowColor = color(0xd946ef); // fuchsia-500
+      // Conditional output: debug shows raw background, normal shows dots
+      const dotOutput = cellColor.mul(dot).mul(uniforms.reveal);
+      const debugOutput = backgroundFn(uv()).mul(uniforms.reveal);
+      const finalColor = mix(dotOutput, debugOutput, uniforms.debugBackground);
 
-    // Mix colors based on UV position for variation
-    const colorMix = uv().x.add(uv().y).mul(0.5);
-    const finalColor = mix(baseColor, glowColor, colorMix);
-
-    // Apply dot pattern with reveal animation
-    mat.colorNode = finalColor.mul(dot).mul(reveal);
-
-    // Transparent background
-    mat.transparent = true;
-    mat.opacityNode = dot.mul(reveal);
-
-    return mat;
-  }, [dotSize, gridScale, time, reveal]);
+      mat.colorNode = finalColor;
+      mat.transparent = true;
+      mat.opacityNode = mix(dot, float(1), uniforms.debugBackground).mul(
+        uniforms.reveal
+      );
+    },
+    [uniforms]
+  );
 
   return (
     <mesh material={material} onClick={() => scope.methods.pulse()}>
-      <planeGeometry args={[10, 10]} />
+      <planeGeometry args={[viewport.width, viewport.height]} />
     </mesh>
   );
 }
-
