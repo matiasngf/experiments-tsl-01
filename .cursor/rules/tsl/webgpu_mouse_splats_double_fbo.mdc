@@ -1,0 +1,239 @@
+---
+description: Mouse splats & drawFbo - running multiple passes to follow the mouse and using DoubleFbo for ping-pong textures.
+alwaysApply: false
+---
+
+# Mouse Splats & Double FBO Ping-Pong
+
+A guide to running multiple shader passes per frame to "follow the mouse" and using a DoubleFbo for ping-pong texture feedback effects.
+
+---
+
+## Core Concepts
+
+### DoubleFbo (Ping-Pong Buffer)
+
+A double-buffered FBO allows reading from the previous frame while writing to the current frame. Essential for:
+
+- Trail/paint effects
+- Fluid simulations
+- Any effect that accumulates over time
+
+### Multiple Renders Per Frame
+
+To avoid gaps when drawing along the mouse path, render multiple times per frame with interpolated mouse positions between the last and current position.
+
+### FPS-Independent Effects
+
+Use `effectDelta` (frame delta divided by render count) to make fade/accumulation effects consistent across different refresh rates.
+
+---
+
+## Required Imports
+
+```typescript
+import { useDoubleFbo, useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
+import { useFrame } from "@react-three/fiber";
+import { useRef } from "react";
+import { Vector2 } from "three";
+import { Fn, screenSize, texture, uniform, uniformTexture, uv, vec2 } from "three/tsl";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+```
+
+---
+
+## Basic Setup
+
+### 1. Create the DoubleFbo and Uniforms
+
+```typescript
+const RENDERS_PER_FRAME = 5; // Higher = smoother trails, more GPU work
+
+function Scene() {
+  const drawFbo = useDoubleFbo();
+  const lastMousePosition = useRef(new Vector2(0, 0));
+
+  const uniforms = useUniforms(() => ({
+    feedbackMap: uniformTexture(drawFbo.read.texture),
+    mouseUv: uniform(vec2(0)),
+    fadeOutFactor: uniform(1),    // Bigger = stronger fade out
+    effectDelta: uniform(0.1),    // Frame delta / RENDERS_PER_FRAME
+  }));
+```
+
+### 2. Create the Draw Material
+
+```typescript
+  const drawMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    const colorFn = Fn(() => {
+      // Aspect correction for circular shapes
+      const aspectFix = screenSize.x.div(screenSize.y);
+
+      // Mouse position in screen space (aspect corrected)
+      const center = uniforms.mouseUv.mul(vec2(aspectFix, 1));
+
+      // UV in screen space (aspect corrected, Y flipped)
+      let screenSpace = uv().mul(2).sub(1);
+      screenSpace = vec2(screenSpace.x, screenSpace.y.negate()).mul(vec2(aspectFix, 1));
+
+      // SDF circle at mouse position
+      const radius = 0.1;
+      const dist = screenSpace.sub(center).length().sub(radius);
+      const shape = dist.mul(-1).step(0); // 1 inside, 0 outside
+
+      // Sample previous frame (note: flipY for correct orientation)
+      const prevSample = texture(uniforms.feedbackMap, uv().flipY());
+
+      // FPS-independent fade: fadeOutFactor * effectDelta, with minimum to prevent stalling
+      const subFactor = uniforms.fadeOutFactor.mul(uniforms.effectDelta).max(0.002);
+
+      // Combine: fade previous + add new shape
+      const result = prevSample;
+      result.subAssign(subFactor);
+      result.addAssign(shape);
+      result.clampAssign(0, 1);
+
+      return result;
+    });
+
+    mat.colorNode = colorFn();
+  }, [uniforms]);
+```
+
+### 3. Setup the QuadShader with Manual Rendering
+
+```typescript
+  const drawApi = useQuadShader({
+    material: drawMaterial,
+    renderTarget: drawFbo,
+    autoRender: true,
+    autoSwap: true,
+    beforeRender: () => {
+      uniforms.feedbackMap.value = drawFbo.read.texture;
+    },
+  });
+```
+
+### 4. Interpolate Mouse Position Each Frame
+
+```typescript
+  useFrame((state, delta) => {
+    const currentMousePosition = state.pointer;
+    const lastPos = lastMousePosition.current;
+
+    // FPS-independent: divide delta by number of renders
+    uniforms.effectDelta.value = delta / RENDERS_PER_FRAME;
+
+    // Render multiple times, interpolating mouse position
+    for (let i = 0; i < RENDERS_PER_FRAME; i++) {
+      const t = (i + 1) / RENDERS_PER_FRAME;
+      const interpolatedX = lastPos.x + (currentMousePosition.x - lastPos.x) * t;
+      const interpolatedY = lastPos.y + (currentMousePosition.y - lastPos.y) * t;
+
+      uniforms.mouseUv.value.set(interpolatedX, interpolatedY);
+      drawApi.render(delta);
+    }
+
+    // Update last position after all renders
+    lastMousePosition.current.set(currentMousePosition.x, currentMousePosition.y);
+  }, 1);
+```
+
+### 5. Display the Result
+
+```typescript
+  const screenUniforms = useUniforms(() => ({
+    map: uniformTexture(drawFbo.texture),
+  }));
+
+  const screenMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    mat.colorNode = texture(screenUniforms.map, uv());
+  }, []);
+
+  useQuadShader({
+    material: screenMaterial,
+    renderTarget: null,
+    beforeRender: () => {
+      screenUniforms.map.value = drawFbo.read.texture;
+    },
+    priority: 2,
+  });
+
+  return null;
+}
+```
+
+---
+
+## Key Patterns
+
+### Aspect Correction
+
+Without aspect correction, circles appear as ellipses on non-square viewports:
+
+```typescript
+const aspectFix = screenSize.x.div(screenSize.y);
+
+// Apply to both mouse position and screen UV
+const center = uniforms.mouseUv.mul(vec2(aspectFix, 1));
+const screenSpace = uv().mul(2).sub(1).mul(vec2(aspectFix, 1));
+```
+
+### UV FlipY for Feedback Textures
+
+When sampling the previous frame, flip Y to match texture orientation:
+
+```typescript
+const prevSample = texture(uniforms.feedbackMap, uv().flipY());
+```
+
+### RENDERS_PER_FRAME Tuning
+
+| Value | Effect                               |
+| ----- | ------------------------------------ |
+| 1     | Gaps visible at fast mouse movement |
+| 3     | Good balance for most cases         |
+| 5+    | Very smooth, higher GPU cost        |
+
+### FPS-Independent Fade
+
+To ensure consistent fade speed across different refresh rates (60Hz, 120Hz, 144Hz):
+
+```typescript
+// In useFrame: divide delta by number of renders
+uniforms.effectDelta.value = delta / RENDERS_PER_FRAME;
+
+// In shader: multiply fadeOutFactor by effectDelta
+const subFactor = uniforms.fadeOutFactor.mul(uniforms.effectDelta).max(0.002);
+result.subAssign(subFactor);
+```
+
+The `.max(0.002)` ensures a minimum fade to prevent trails from stalling completely.
+
+### Assign Operators Pattern
+
+Use `subAssign`, `addAssign`, `clampAssign` for in-place modifications:
+
+```typescript
+const result = prevSample;
+result.subAssign(subFactor);   // result -= subFactor
+result.addAssign(shape);       // result += shape
+result.clampAssign(0, 1);      // result = clamp(result, 0, 1)
+```
+
+---
+
+## DoubleFbo API
+
+```typescript
+const fbo = useDoubleFbo({
+  width?: number,   // Defaults to viewport width
+  height?: number,  // Defaults to viewport height
+  // ...RenderTargetOptions
+});
+
+fbo.read       // RenderTarget to read from (previous frame)
+fbo.write      // RenderTarget to write to (current frame)
+fbo.texture    // Shorthand for fbo.read.texture
+fbo.swap()     // Swap read/write buffers (handled by autoSwap)
+```
