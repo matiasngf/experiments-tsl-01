@@ -4,14 +4,13 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
-import { uv, float, smoothstep, mix, renderOutput, hash, vec3, mx_worley_noise_vec2, mx_worley_noise_float } from "three/tsl";
+import { uv, float, smoothstep, mix, renderOutput, vec3, mx_worley_noise_float, uniform } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
 import { useControls } from "leva";
 import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
 import { useUniforms, useMaterial, cellSampling } from "@/lib/tsl";
-import { mx_perlin_noise_float } from "three/src/nodes/materialx/lib/mx_noise.js";
 
 export default function DottedGridPage() {
   return (
@@ -68,12 +67,12 @@ function DottedGrid() {
 
   // TSL uniforms using useUniforms hook
   const uniforms = useUniforms({
-    time: 0,
-    reveal: 1,
-    dotSize: 0.38,
-    gridScale: 50,
-    debugBackground: 0,
-    aspect: aspect,
+    time: uniform(0),
+    reveal: uniform(1),
+    dotSize: uniform(0.38),
+    gridScale: uniform(50),
+    debugBackground: uniform(0),
+    aspect: uniform(aspect),
   });
 
   // Leva controls with onChange for direct uniform updates

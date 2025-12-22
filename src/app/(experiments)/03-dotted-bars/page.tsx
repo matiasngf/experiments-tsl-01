@@ -4,7 +4,7 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
-import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor, Fn, cos, sin, uniform } from "three/tsl";
+import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, abs, fract, floor, Fn, cos, sin, uniform } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
