@@ -5,9 +5,10 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import type { RenderCallback } from "@react-three/fiber";
 import { Mesh, Scene } from "three";
-import type { RenderTarget } from "three/webgpu";
+import type { RenderTarget, WebGPURenderer } from "three/webgpu";
 import type { NodeMaterial } from "three/webgpu";
 import { quadGeometry, quadCamera } from "./quads";
+import { DoubleFbo } from "./double-fbo";
 
 /**
  * Options for the useQuadShader hook.
@@ -22,7 +23,7 @@ export interface UseQuadShaderOptions {
   /**
    * The RenderTarget or its ref to render to, or null to render to screen.
    */
-  renderTarget: RenderTarget | RefObject<RenderTarget | null> | null;
+  renderTarget: RenderTarget | DoubleFbo | RefObject<RenderTarget | DoubleFbo | null> | null;
 
   /**
    * Optional callback to run before rendering the quad.
@@ -38,6 +39,11 @@ export interface UseQuadShaderOptions {
    * Whether the quad should automatically render each frame. Defaults to true.
    */
   autoRender?: boolean;
+
+  /**
+   * Whether the quad should automatically swap render targets on doubleFbos
+   */
+  autoSwap?: boolean;
 
   /**
    * Priority of the render callback in the render loop.
@@ -127,6 +133,7 @@ export function useQuadShader(options: UseQuadShaderOptions): QuadShaderApi {
     beforeRender,
     afterRender,
     autoRender = true,
+    autoSwap = true,
     priority = 0,
     clear = true,
   } = options;
@@ -160,6 +167,8 @@ export function useQuadShader(options: UseQuadShaderOptions): QuadShaderApi {
   const clearRef = useRef(clear);
   clearRef.current = clear;
 
+  const gpu = useThree(state => state.gl as any as WebGPURenderer)
+
   // Core render function
   const renderQuad = useCallback(
     (delta: number, frame?: XRFrame) => {
@@ -168,23 +177,31 @@ export function useQuadShader(options: UseQuadShaderOptions): QuadShaderApi {
         beforeRenderRef.current(state, delta, frame);
       }
 
+      const target = renderTargetRef.current && "current" in renderTargetRef.current ? renderTargetRef.current.current : renderTargetRef.current
+
       // Set render target
-      const target = renderTargetRef.current;
+      // const target = renderTargetRef.current;
       if (!target) {
-        state.gl.setRenderTarget(null);
-      } else if ("current" in target) {
-        state.gl.setRenderTarget(target.current as any);
+        gpu.setRenderTarget(null);
+      }
+      else if(target instanceof DoubleFbo) {
+        // doubleFbo
+        gpu.setRenderTarget(target.write);
       } else {
-        state.gl.setRenderTarget(target as any);
+        gpu.setRenderTarget(target);
       }
 
       // Clear if requested
       if (clearRef.current) {
-        state.gl.clear();
+        gpu.clear();
       }
 
       // Render the quad
-      state.gl.render(containerScene, quadCamera);
+      gpu.render(containerScene, quadCamera);
+
+      if(target instanceof DoubleFbo && autoSwap) {
+        target.swap()
+      }
 
       // Call afterRender callback if provided
       if (afterRenderRef.current) {
@@ -192,9 +209,9 @@ export function useQuadShader(options: UseQuadShaderOptions): QuadShaderApi {
       }
 
       // Reset to default render target
-      state.gl.setRenderTarget(null);
+      gpu.setRenderTarget(null);
     },
-    [state, containerScene]
+    [state, containerScene, gpu]
   );
 
   // Auto-render using useFrame when enabled

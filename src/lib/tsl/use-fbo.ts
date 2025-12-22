@@ -6,7 +6,7 @@ import type { RenderTargetOptions, Texture } from "three";
 /**
  * Parameters for the useRenderTarget hook.
  */
-export interface UseRenderTargetParams extends RenderTargetOptions {
+export interface UseFboParams extends RenderTargetOptions {
   /** Width of the render target. Defaults to viewport width if not specified. */
   width?: number;
   /** Height of the render target. Defaults to viewport height if not specified. */
@@ -47,13 +47,13 @@ export interface UseRenderTargetParams extends RenderTargetOptions {
  * });
  * ```
  */
-export function useRenderTarget<
+export function useFbo<
   TTexture extends Texture | Texture[] = Texture,
 >({
   width,
   height,
   ...options
-}: UseRenderTargetParams = {}): RenderTarget<TTexture> {
+}: UseFboParams = {}): RenderTarget<TTexture> {
   const w = useThree((s) => {
     if (typeof width === "number") {
       return width;

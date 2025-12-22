@@ -1,58 +1,43 @@
 import { useMemo } from "react";
-import { uniform } from "three/tsl";
-import type { Color, Vector2, Vector3, Vector4, Matrix3, Matrix4 } from "three";
+import { UniformNode } from "three/webgpu";
 
 /**
- * Supported types for TSL uniforms.
- * Maps JavaScript/Three.js types to their TSL uniform node equivalents.
+ * A TSL uniform node (result of `uniform()` from three/tsl).
  */
-type UniformValue =
-  | number
-  | Color
-  | Vector2
-  | Vector3
-  | Vector4
-  | Matrix3
-  | Matrix4;
+ 
+type AnyUniformNode = UniformNode<unknown>
 
 /**
- * Maps an input value type to its corresponding TSL uniform node type.
- * The uniform node has a `.value` property of the same type for updates.
+ * Record of TSL uniform nodes.
  */
-type UniformNode<T extends UniformValue> = ReturnType<typeof uniform<T>>;
+type UniformsRecord = Record<string, AnyUniformNode>;
 
 /**
- * Transforms a record of initial values into a record of TSL uniform nodes.
- */
-type UniformNodes<T extends Record<string, UniformValue>> = {
-  [K in keyof T]: UniformNode<T[K]>;
-};
-
-/**
- * Creates memoized TSL uniform nodes from an initial values object.
+ * Creates memoized TSL uniform nodes from a factory function or object.
  *
- * Unlike WebGL's `useUniforms` which wraps values in `{ value: T }` objects,
- * this hook takes plain values and creates TSL `uniform()` nodes automatically.
+ * Unlike the WebGL version which takes `{ value: T }` objects, TSL uses
+ * `uniform()` nodes directly. This hook memoizes those nodes to ensure
+ * stable references across re-renders.
  *
- * The uniform nodes are created once and memoized. Update values by setting
- * the `.value` property on each uniform node.
- *
- * @typeParam T - Record of uniform names to their initial values
- * @param initialValues - Object with uniform names as keys and initial values
- * @returns Object with the same keys, but values are TSL uniform nodes
+ * @typeParam T - Record of uniform names to their TSL uniform nodes
+ * @param uniforms - Object with uniform nodes, or factory function returning them
+ * @returns The memoized uniforms object
  *
  * @example
  * ```tsx
  * import { useUniforms } from "@/lib/tsl";
+ * import { uniform, vec2 } from "three/tsl";
  * import { Color, Vector2 } from "three";
  *
  * function MyMesh() {
- *   const uniforms = useUniforms({
- *     time: 0,
- *     intensity: 1.5,
- *     baseColor: new Color(0xff0000),
- *     resolution: new Vector2(1920, 1080),
- *   });
+ *   // Using a factory function (recommended)
+ *   const uniforms = useUniforms(() => ({
+ *     time: uniform(0),
+ *     intensity: uniform(1.5),
+ *     baseColor: uniform(new Color(0xff0000)),
+ *     mouseUv: uniform(vec2(0, 0)),
+ *     resolution: uniform(new Vector2(1920, 1080)),
+ *   }));
  *
  *   // Update uniforms each frame
  *   useFrame(({ clock }) => {
@@ -70,20 +55,12 @@ type UniformNodes<T extends Record<string, UniformValue>> = {
  * }
  * ```
  */
-export function useUniforms<T extends Record<string, UniformValue>>(
-  initialValues: T
-): UniformNodes<T> {
-  return useMemo(() => {
-    const nodes = {} as UniformNodes<T>;
-
-    for (const key in initialValues) {
-      const value = initialValues[key];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      nodes[key] = uniform(value) as any;
+export function useUniforms<T extends UniformsRecord>(uniforms: T | (() => T)): T {
+  return useMemo<T>(() => {
+    if (typeof uniforms === "function") {
+      return uniforms();
     }
-
-    return nodes;
+    return uniforms;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 }
-

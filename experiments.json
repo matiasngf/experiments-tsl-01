@@ -8,15 +8,11 @@
     "name": "02 Dotted Grid"
   },
   {
-    "url": "/03-tsl-uniforms",
-    "name": "03 Tsl Uniforms"
+    "url": "/03-dotted-bars",
+    "name": "03 Dotted Bars"
   },
   {
-    "url": "/04-tsl-material",
-    "name": "04 Tsl Material"
-  },
-  {
-    "url": "/05-tsl-fbo",
-    "name": "05 Tsl Fbo"
+    "url": "/04-double-fbo-test",
+    "name": "04 Double Fbo Test"
   }
 ]

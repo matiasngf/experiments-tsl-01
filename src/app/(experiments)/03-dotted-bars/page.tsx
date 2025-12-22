@@ -4,7 +4,7 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
-import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor, Fn, cos, sin } from "three/tsl";
+import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor, Fn, cos, sin, uniform } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
@@ -133,16 +133,16 @@ function DottedGrid() {
 
   // TSL uniforms using useUniforms hook
   const uniforms = useUniforms({
-    time: 0,
-    reveal: 1,
-    dotSize: DEFAULTS.dotSize,
-    gridScale: DEFAULTS.gridScale,
-    debugBackground: DEFAULTS.debugBackground ? 1 : 0,
-    aspect: aspect,
+    time: uniform(0),
+    reveal: uniform(1),
+    dotSize: uniform(DEFAULTS.dotSize),
+    gridScale: uniform(DEFAULTS.gridScale),
+    debugBackground: uniform(DEFAULTS.debugBackground ? 1 : 0),
+    aspect: uniform(aspect),
     // Diagonal lines
-    lineCount: DEFAULTS.lineCount,
-    lineWidth: DEFAULTS.lineWidth,
-    lineAngle: (DEFAULTS.lineAngle * Math.PI) / 180,
+    lineCount: uniform(DEFAULTS.lineCount),
+    lineWidth: uniform(DEFAULTS.lineWidth),
+    lineAngle: uniform((DEFAULTS.lineAngle * Math.PI) / 180),
   });
 
   // Leva controls with onChange for direct uniform updates
@@ -266,21 +266,14 @@ function DottedGrid() {
         // Use abs() since lineCellIndex can be negative in centered coordinate space
         const lineHash = hash(abs(lineCellIndex).add(1)).pow(1)
 
-        // Base noise
-        const scaledUv = uvCoord.mul(100);
-        const noise2d = mx_worley_noise_float(scaledUv);
-
         // Combine: stripes with random hash brightness
         const stripeColor = vec3(1).mul(stripe).mul(lineHash);
-        const baseColor = vec3(0.1).add(noise2d.mul(0.1));
 
-        const diagonalLight = lineLocalY.remapClamp(1, 0, 1, 0).pow(3)
+        const diagonalLight = lineLocalY.remapClamp(1, -1, 1, 0).pow(3)
         stripeColor.mulAssign(diagonalLight);
         stripeColor.mulAssign(lineLocalX.mul(2).oneMinus())
 
         return vec3(stripeColor)
-
-        return mix(baseColor, stripeColor.add(baseColor), stripe);
       });
 
       // Cell sampling for pixelated grid with perfectly square cells

@@ -1,8 +1,8 @@
 // Hooks
 export { useUniforms } from "./use-uniforms";
 export { useMaterial } from "./use-material";
-export { useRenderTarget } from "./use-render-target";
-export type { UseRenderTargetParams } from "./use-render-target";
+export { useFbo } from "./use-fbo";
+export type { UseFboParams } from "./use-fbo";
 export { useDoubleFbo } from "./use-double-fbo";
 export type { UseDoubleFboParams } from "./use-double-fbo";
 export { useQuadShader } from "./use-quad-shader";
