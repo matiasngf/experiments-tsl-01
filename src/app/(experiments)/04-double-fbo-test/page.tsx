@@ -29,8 +29,6 @@ export default function DoubleFboTestPage() {
 }
 
 function Scene() {
-  const { viewport } = useThree();
-
   const drawFbo = useDoubleFbo()
   
   const uniforms = useUniforms(() => ({
