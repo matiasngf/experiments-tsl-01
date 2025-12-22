@@ -11,19 +11,19 @@ This project contains the following TSL utilities in `@/lib/tsl`:
 
 ## useUniforms
 
-Creates memoized TSL uniform nodes from initial values. Unlike WebGL's `useUniforms` which wraps values in `{ value: T }` objects, this hook takes plain values and creates TSL `uniform()` nodes automatically.
+Creates memoized TSL uniform nodes from initial values. Creating the uniforms witha a callback function avoids creating multiple uniform references.
 
 ```tsx
 import { useUniforms } from "@/lib/tsl";
 import { Color, Vector2 } from "three";
 
 function MyMesh() {
-  const uniforms = useUniforms({
-    time: 0,
-    intensity: 1.5,
-    baseColor: new Color(0xff0000),
-    resolution: new Vector2(1920, 1080),
-  });
+  const uniforms = useUniforms(() => ({
+    time: uniform(0),
+    intensity: uniform(1.5),
+    baseColor: uniform(new Color(0xff0000)),
+    resolution: uniform(new Vector2(1920, 1080)),
+  }));
 
   // Update uniforms each frame
   useFrame(({ clock }) => {
@@ -70,7 +70,7 @@ function GradientMesh() {
 Combine with `useUniforms` for dynamic updates. Pass uniforms as a dependency to ensure proper memoization:
 
 ```tsx
-const uniforms = useUniforms({ progress: 0, time: 0 });
+const uniforms = useUniforms({ progress: uniform(0), time: uniform(0) });
 
 const material = useMaterial(
   MeshPhysicalNodeMaterial,
@@ -88,19 +88,19 @@ useFrame(({ clock }) => {
 
 ---
 
-## useRenderTarget
+## useFbo
 
 Creates a WebGPU-compatible RenderTarget with automatic resizing. Uses Three.js's WebGPU `RenderTarget` class.
 
 ```tsx
-import { useRenderTarget } from "@/lib/tsl";
+import { useFbo } from "@/lib/tsl";
 import { FloatType } from "three";
 
 // Matches viewport size automatically
-const renderTarget = useRenderTarget({});
+const renderTarget = useFbo({});
 
 // Fixed size with options
-const fixedTarget = useRenderTarget({
+const fixedTarget = useFbo({
   width: 1024,
   height: 1024,
   type: FloatType,
@@ -152,6 +152,84 @@ useFrame(({ gl, scene, camera }) => {
 - `doubleFbo.texture` - Shorthand for `read.texture`
 - `doubleFbo.swap()` - Swap read/write buffers
 
+### Sampling from DoubleFbo with useQuadShader
+
+When rendering to a DoubleFbo and displaying the result, use `uniformTexture()` to create a texture uniform that can be updated after each buffer swap. The `afterRender` callback ensures the display material always samples from the latest swapped buffer:
+
+```tsx
+import { useDoubleFbo, useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
+import { texture, uniformTexture, uv, vec2 } from "three/tsl";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+
+function Scene() {
+  const { viewport } = useThree();
+
+  // Create the double FBO for ping-pong rendering
+  const drawFbo = useDoubleFbo();
+
+  // Material that renders to the FBO
+  const drawMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    // Your shader logic here
+    mat.colorNode = uv(); // Example: gradient
+  }, []);
+
+  // Create a texture uniform from the FBO's read texture
+  const screenUniforms = useUniforms(() => ({
+    map: uniformTexture(drawFbo.texture)
+  }));
+
+  // Material that displays the FBO result
+  const screenMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    mat.colorNode = texture(screenUniforms.map, uv());
+  }, []);
+
+  // Render to the DoubleFbo with automatic swapping
+  useQuadShader({
+    material: drawMaterial,
+    renderTarget: drawFbo,
+    autoRender: true,
+    autoSwap: true,
+    // CRITICAL: Update the texture uniform AFTER the swap
+    // This ensures the display material samples the latest buffer
+    afterRender: () => {
+      screenUniforms.map.value = drawFbo.texture;
+    }
+  });
+
+  return (
+    <mesh material={screenMaterial}>
+      <planeGeometry args={[viewport.width, viewport.height]} />
+    </mesh>
+  );
+}
+```
+
+**Key Points:**
+- `uniformTexture(texture)` - Creates a texture uniform node that can be updated at runtime
+- `texture(uniformNode, uv())` - Samples from the texture stored in the uniform
+- `autoSwap: true` - Automatically calls `doubleFbo.swap()` after rendering
+- `afterRender` - Callback that runs after render (and after swap if `autoSwap: true`)
+- Update `screenUniforms.map.value` in `afterRender` to avoid "low FPS" appearance from sampling stale buffers
+
+---
+
+## Texture Sampling
+
+### Sampling from a Texture
+
+Use the `texture()` function from `three/tsl` to sample textures:
+
+```tsx
+import { texture, uv } from "three/tsl";
+
+// Sample at current UV coordinates
+const sampled = texture(myTexture, uv());
+
+// Sample at custom UV
+const flippedUV = vec2(uv().x, uv().y.oneMinus());
+const sampled = texture(myTexture, flippedUV);
+```
+
 ---
 
 ## quads
@@ -178,12 +256,12 @@ gl.setRenderTarget(null);
 Hook for rendering a fullscreen quad with a NodeMaterial, optionally to a render target. Commonly used for postprocessing, compute-like effects, or rendering to texture.
 
 ```tsx
-import { useQuadShader, useRenderTarget, useMaterial } from "@/lib/tsl";
+import { useQuadShader, useFbo, useMaterial } from "@/lib/tsl";
 import { MeshBasicNodeMaterial } from "three/webgpu";
 import { color, uv, mix } from "three/tsl";
 
 function EffectPass() {
-  const renderTarget = useRenderTarget({ width: 512, height: 512 });
+  const renderTarget = useFbo({ width: 512, height: 512 });
 
   const material = useMaterial(MeshBasicNodeMaterial, (mat) => {
     mat.colorNode = mix(color(0xff0000), color(0x0000ff), uv().x);
@@ -236,11 +314,12 @@ useQuadShader({
 
 **Options:**
 - `material` - The NodeMaterial to apply to the quad
-- `renderTarget` - RenderTarget, ref, or null (screen)
+- `renderTarget` - RenderTarget, DoubleFbo, ref, or null (screen)
 - `autoRender` - Auto-render each frame (default: true)
+- `autoSwap` - Auto-swap DoubleFbo buffers after render (default: false)
 - `priority` - Render loop priority
 - `clear` - Clear before rendering (default: true)
-- `beforeRender` / `afterRender` - Lifecycle callbacks
+- `beforeRender` / `afterRender` - Lifecycle callbacks (afterRender runs after swap when `autoSwap: true`)
 
 ---
 
@@ -412,6 +491,7 @@ mat.emissiveNode = result.get("emissive");
 // Core TSL
 import {
   uniform,
+  uniformTexture,
   color,
   vec2,
   vec3,
@@ -467,6 +547,8 @@ import {
 | Aspect | WebGL | TSL |
 |--------|-------|-----|
 | Uniforms | `{ value: T }` objects | `uniform(T)` nodes |
+| Texture uniforms | `uniform({ value: texture })` | `uniformTexture(texture)` |
+| Texture sampling | GLSL: `texture2D(map, uv)` | TSL: `texture(map, uv())` |
 | Material | `ShaderMaterial` with GLSL strings | `NodeMaterial` with TSL nodes |
 | Color ops | GLSL: `vec3 * float` | TSL: `color.mul(float)` |
 | Update | `uniform.value = x` | Same: `uniformNode.value = x` |
