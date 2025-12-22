@@ -19,10 +19,10 @@ import OperatorNode from "three/src/nodes/math/OperatorNode.js";
 // ============================================================================
 
 const DEFAULTS = {
-  dotSize: 0.48,
-  gridScale: 50,
+  dotSize: 0.41,
+  gridScale: 35,
   lineCount: 4,
-  lineAngle: 50, // degrees
+  lineAngle: 63, // degrees
   lineWidth: 1.1,
   debugBackground: false,
 };
