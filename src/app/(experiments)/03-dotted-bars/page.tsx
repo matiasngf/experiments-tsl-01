@@ -4,15 +4,28 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
-import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor } from "three/tsl";
+import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor, Fn } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
-import { useControls } from "leva";
+import { useControls, button } from "leva";
 import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
 import { useUniforms, useMaterial, cellSampling, rotateUV } from "@/lib/tsl";
 import MathNode from "three/src/nodes/math/MathNode.js";
 import OperatorNode from "three/src/nodes/math/OperatorNode.js";
+
+// ============================================================================
+// Default Settings
+// ============================================================================
+
+const DEFAULTS = {
+  dotSize: 0.48,
+  gridScale: 50,
+  lineCount: 4,
+  lineAngle: 50, // degrees
+  lineWidth: 1.1,
+  debugBackground: false,
+};
 
 // ============================================================================
 // Diagonal Line Sampling - Local to this experiment
@@ -122,27 +135,27 @@ function DottedGrid() {
   const uniforms = useUniforms({
     time: 0,
     reveal: 1,
-    dotSize: 0.38,
-    gridScale: 50,
-    debugBackground: 0,
+    dotSize: DEFAULTS.dotSize,
+    gridScale: DEFAULTS.gridScale,
+    debugBackground: DEFAULTS.debugBackground ? 1 : 0,
     aspect: aspect,
     // Diagonal lines
-    lineCount: 4  ,
-    lineWidth: 1.1,
-    lineAngle: Math.PI / 6, // 30 degrees
+    lineCount: DEFAULTS.lineCount,
+    lineWidth: DEFAULTS.lineWidth,
+    lineAngle: (DEFAULTS.lineAngle * Math.PI) / 180,
   });
 
   // Leva controls with onChange for direct uniform updates
-  useControls({
+  useControls(() => ({
     debugBackground: {
-      value: false,
+      value: DEFAULTS.debugBackground,
       label: "Debug Background",
       onChange: (v: boolean) => {
         uniforms.debugBackground.value = v ? 1 : 0;
       },
     },
     dotSize: {
-      value: 0.38,
+      value: DEFAULTS.dotSize,
       min: 0,
       max: 1,
       step: 0.01,
@@ -152,7 +165,7 @@ function DottedGrid() {
       },
     },
     gridScale: {
-      value: 50,
+      value: DEFAULTS.gridScale,
       min: 2,
       max: 50,
       step: 1,
@@ -162,7 +175,7 @@ function DottedGrid() {
       },
     },
     lineCount: {
-      value: 4,
+      value: DEFAULTS.lineCount,
       min: 2,
       max: 40,
       step: 1,
@@ -172,7 +185,7 @@ function DottedGrid() {
       },
     },
     lineAngle: {
-      value: 30,
+      value: DEFAULTS.lineAngle,
       min: 0,
       max: 90,
       step: 1,
@@ -181,7 +194,17 @@ function DottedGrid() {
         uniforms.lineAngle.value = (v * Math.PI) / 180;
       },
     },
-  });
+    "Copy Settings": button((get) => {
+      const settings = {
+        dotSize: get("dotSize"),
+        gridScale: get("gridScale"),
+        lineCount: get("lineCount"),
+        lineAngle: get("lineAngle"),
+      };
+      navigator.clipboard.writeText(JSON.stringify(settings, null, 2));
+      console.log("Settings copied to clipboard:", settings);
+    }),
+  }));
 
   // Anime.js for smooth animations
   const scope = useAnime({
@@ -214,11 +237,12 @@ function DottedGrid() {
     (mat) => {
       // === Background with diagonal stripes ===
       // This gets sampled at cell centers for the pixelation effect
-      const backgroundFn = (uvCoord: Node) => {
+      const backgroundFn = Fn(([uvCoord]: [Node]) => {
         // Diagonal stripes: rotate UV and compress Y
         const rotatedUV = rotateUV(uvCoord, uniforms.lineAngle);
         const scaledX = rotatedUV.x.mul(uniforms.lineCount).mul(uniforms.aspect);
         const lineLocalX = fract(scaledX).sub(0.5);
+        const lineLocalY = rotatedUV.y;
         const lineCellIndex = floor(scaledX);
 
         // Stripe SDF
@@ -227,18 +251,24 @@ function DottedGrid() {
         const stripe = smoothstep(halfWidth, halfWidth.sub(0.02), stripeDistance);
 
         // Random brightness per stripe using line index
-        const lineHash = hash(lineCellIndex.add(42));
+        const lineHash = hash(lineCellIndex.add(1)).pow(1)
 
         // Base noise
         const scaledUv = uvCoord.mul(100);
         const noise2d = mx_worley_noise_float(scaledUv);
 
         // Combine: stripes with random hash brightness
-        const stripeColor = vec3(0.6, 0.65, 0.75).mul(stripe).mul(lineHash);
+        const stripeColor = vec3(1).mul(stripe).mul(lineHash);
         const baseColor = vec3(0.1).add(noise2d.mul(0.1));
 
+        const diagonalLight = lineLocalY.remapClamp(1, 0, 1, 0).pow(3)
+        stripeColor.mulAssign(diagonalLight);
+        stripeColor.mulAssign(lineLocalX.mul(2).oneMinus())
+
+        return vec3(stripeColor)
+
         return mix(baseColor, stripeColor.add(baseColor), stripe);
-      };
+      });
 
       // Cell sampling for pixelated grid with perfectly square cells
       const { cellCenterUV, localUV } = cellSampling(
