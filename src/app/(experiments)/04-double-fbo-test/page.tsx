@@ -9,7 +9,7 @@ import { Suspense, useRef } from "react";
 import { Vector2 } from "three";
 import MathNode from "three/src/nodes/math/MathNode.js";
 import OperatorNode from "three/src/nodes/math/OperatorNode.js";
-import { float, texture, uniform, uniformTexture, uv, vec2, vec3 } from "three/tsl";
+import { float, screenSize, texture, uniform, uniformTexture, uv, vec2, vec3 } from "three/tsl";
 import { JoinNode, MeshBasicNodeMaterial, WebGPURenderer } from "three/webgpu";
 
 export default function DoubleFboTestPage() {
@@ -45,23 +45,24 @@ function Scene() {
 
   const drawMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
 
+    const aspectFix = screenSize.x.div(screenSize.y)
+
     // Simple SDF sphere centered at mouseUv.
     // For node-based TSL SDF: d = length(uv - center) - radius
     const radius = 0.1;
-    const center = uniforms.mouseUv;
+    const center = uniforms.mouseUv.mul(vec2(aspectFix, 1));
     let screenSpace: OperatorNode | JoinNode = uv().mul(2).sub(1)
-    screenSpace = vec2(screenSpace.x, screenSpace.y.negate())
+    screenSpace = vec2(screenSpace.x, screenSpace.y.negate()).mul(vec2(aspectFix, 1))
+    
     const dist = screenSpace.sub(center).length().sub(radius); // uv() - center length - radius
 
     // Visualize SDF: white inside the sphere, black outside, smooth edge
     // We'll use smoothstep for anti-aliased edge
     // White when dist < 0
     const sdf = dist;
-    const edge = 0.002;
     const color = sdf
       .mul(-1)
-      .smoothstep(-edge, edge)
-      .mix(vec3(0), vec3(1)); // fade 0->1
+      .step(0)
 
     const prevSample = texture(uniforms.feedbackMap, uv().flipY());
 
@@ -73,7 +74,10 @@ function Scene() {
     // reduces the multiply factor to ensure it reaches 0
     const multiplyFactor = prevSample.x.pow(0.5).remapClamp(0.5, 0., maxMix, 0)
 
-    const result: MathNode | OperatorNode = prevSample.mul(multiplyFactor).add(color)
+    const result: MathNode | OperatorNode = prevSample
+      .mul(multiplyFactor)
+      .add(color)
+      .clamp(0,1)
 
     mat.colorNode = result
 
