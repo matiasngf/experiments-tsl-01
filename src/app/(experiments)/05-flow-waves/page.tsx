@@ -9,7 +9,7 @@ import {
 } from "@/lib/tsl";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useRef } from "react";
-import { Vector2 } from "three";
+import { HalfFloatType, Vector2 } from "three";
 import {
   abs,
   clamp,
@@ -52,7 +52,9 @@ const PI = Math.PI;
 
 function Scene() {
   const { size } = useThree();
-  const drawFbo = useDoubleFbo();
+  const drawFbo = useDoubleFbo({
+    type: HalfFloatType
+  });
   const lastMousePosition = useRef(new Vector2(0, 0));
   const mouseVelocity = useRef(0);
   const mouseDirection = useRef(new Vector2(0, 0));
