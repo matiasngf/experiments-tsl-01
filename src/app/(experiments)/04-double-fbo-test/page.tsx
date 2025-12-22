@@ -31,11 +31,13 @@ export default function DoubleFboTestPage() {
 function Scene() {
   const { viewport } = useThree();
 
+  const drawFbo = useDoubleFbo()
+  
   const uniforms = useUniforms(() => ({
+    feedbackMap: uniformTexture(drawFbo.read.texture),
     mouseUv: uniform(vec2(0)),
   }))
 
-  const drawFbo = useDoubleFbo()
 
   const drawMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
 
@@ -51,13 +53,15 @@ function Scene() {
     // We'll use smoothstep for anti-aliased edge
     // White when dist < 0
     const sdf = dist;
-    const edge = 0.01;
+    const edge = 0.002;
     const color = sdf
       .mul(-1)
       .smoothstep(-edge, edge)
-      .mix(vec2(0, 0), vec2(1, 1)); // fade 0->1
+      .mix(vec3(0), vec3(1)); // fade 0->1
 
-    mat.colorNode = color
+    const result = texture(uniforms.feedbackMap, uv().flipY()).mul(0.9).add(color)
+
+    mat.colorNode = result
 
   }, [uniforms])
 
@@ -68,8 +72,6 @@ function Scene() {
   const screenUniforms = useUniforms(() => ({
     map: uniformTexture(drawFbo.texture)
   }))
-
-  // const u  = uniform(drawFbo.read.texture)
   
   const screenMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
     mat.colorNode = texture(screenUniforms.map, uv())
@@ -80,18 +82,21 @@ function Scene() {
     renderTarget: drawFbo,
     autoRender: true,
     autoSwap: true,
-    afterRender: () => {
-      screenUniforms.map.value = drawFbo.texture
-    }
+    beforeRender: () => {
+      uniforms.feedbackMap.value = drawFbo.read.texture
+    },
+    priority: 1
   })
 
+  useQuadShader({
+    material: screenMaterial,
+    renderTarget: null,
+    beforeRender: () => {
+      screenUniforms.map.value = drawFbo.read.texture
+    },
+    priority: 2,
+  })
 
-  return (
-    <>
-      <mesh material={screenMaterial}>
-        <planeGeometry args={[viewport.width,viewport.height]} />
-      </mesh>
-    </>
-  );
+  return null;
 }
 
