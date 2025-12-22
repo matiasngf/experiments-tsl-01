@@ -4,7 +4,7 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useEffect } from "react";
 import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
-import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor, Fn } from "three/tsl";
+import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor, Fn, cos, sin } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useAnime } from "@/lib/anime/use-anime";
 import { animate, cubicBezier } from "animejs";
@@ -238,11 +238,23 @@ function DottedGrid() {
       // === Background with diagonal stripes ===
       // This gets sampled at cell centers for the pixelation effect
       const backgroundFn = Fn(([uvCoord]: [Node]) => {
-        // Diagonal stripes: rotate UV and compress Y
-        const rotatedUV = rotateUV(uvCoord, uniforms.lineAngle);
-        const scaledX = rotatedUV.x.mul(uniforms.lineCount).mul(uniforms.aspect);
+        // Correct UV to square coordinate space before rotation
+        // This ensures the angle stays visually consistent regardless of aspect ratio
+        const squareUV = vec2(
+          uvCoord.x.sub(0.5).mul(uniforms.aspect),
+          uvCoord.y.sub(0.5)
+        );
+        
+        // Rotate in square space (angle is now visually accurate)
+        const cosA = cos(uniforms.lineAngle);
+        const sinA = sin(uniforms.lineAngle);
+        const rotatedX = squareUV.x.mul(cosA).sub(squareUV.y.mul(sinA));
+        const rotatedY = squareUV.x.mul(sinA).add(squareUV.y.mul(cosA));
+        
+        // Scale for line count (no need for additional aspect correction)
+        const scaledX = rotatedX.mul(uniforms.lineCount);
         const lineLocalX = fract(scaledX).sub(0.5);
-        const lineLocalY = rotatedUV.y;
+        const lineLocalY = rotatedY;
         const lineCellIndex = floor(scaledX);
 
         // Stripe SDF
@@ -251,7 +263,8 @@ function DottedGrid() {
         const stripe = smoothstep(halfWidth, halfWidth.sub(0.02), stripeDistance);
 
         // Random brightness per stripe using line index
-        const lineHash = hash(lineCellIndex.add(1)).pow(1)
+        // Use abs() since lineCellIndex can be negative in centered coordinate space
+        const lineHash = hash(abs(lineCellIndex).add(1)).pow(1)
 
         // Base noise
         const scaledUv = uvCoord.mul(100);
