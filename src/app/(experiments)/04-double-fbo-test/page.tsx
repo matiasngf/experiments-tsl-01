@@ -5,9 +5,11 @@
 
 import { useDoubleFbo, useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { Suspense } from "react";
+import { Suspense, useRef } from "react";
+import { Vector2 } from "three";
+import MathNode from "three/src/nodes/math/MathNode.js";
 import OperatorNode from "three/src/nodes/math/OperatorNode.js";
-import { texture, uniform, uniformTexture, uv, vec2, vec3 } from "three/tsl";
+import { float, texture, uniform, uniformTexture, uv, vec2, vec3 } from "three/tsl";
 import { JoinNode, MeshBasicNodeMaterial, WebGPURenderer } from "three/webgpu";
 
 export default function DoubleFboTestPage() {
@@ -28,12 +30,16 @@ export default function DoubleFboTestPage() {
   );
 }
 
+const RENDERS_PER_FRAME = 3;
+
 function Scene() {
   const drawFbo = useDoubleFbo()
+  const lastMousePosition = useRef(new Vector2(0, 0))
   
   const uniforms = useUniforms(() => ({
     feedbackMap: uniformTexture(drawFbo.read.texture),
     mouseUv: uniform(vec2(0)),
+    fadeOutFactor: uniform(0.05)  // bigger number, stronger fade out
   }))
 
 
@@ -41,7 +47,7 @@ function Scene() {
 
     // Simple SDF sphere centered at mouseUv.
     // For node-based TSL SDF: d = length(uv - center) - radius
-    const radius = 0.25;
+    const radius = 0.1;
     const center = uniforms.mouseUv;
     let screenSpace: OperatorNode | JoinNode = uv().mul(2).sub(1)
     screenSpace = vec2(screenSpace.x, screenSpace.y.negate())
@@ -57,15 +63,22 @@ function Scene() {
       .smoothstep(-edge, edge)
       .mix(vec3(0), vec3(1)); // fade 0->1
 
-    const result = texture(uniforms.feedbackMap, uv().flipY()).mul(0.9).add(color)
+    const prevSample = texture(uniforms.feedbackMap, uv().flipY());
+
+    // mixer for the trail multiplication factor
+    const maxMix = float(1)
+    .sub(uniforms.fadeOutFactor.div(float(RENDERS_PER_FRAME)))
+    .min(float(0.99))
+    
+    // reduces the multiply factor to ensure it reaches 0
+    const multiplyFactor = prevSample.x.pow(0.5).remapClamp(0.5, 0., maxMix, 0)
+
+    const result: MathNode | OperatorNode = prevSample.mul(multiplyFactor).add(color)
 
     mat.colorNode = result
 
-  }, [uniforms])
+  }, [uniforms, RENDERS_PER_FRAME])
 
-  useFrame((state) => {
-    uniforms.mouseUv.value.set(state.pointer.x, state.pointer.y)
-  })
 
   const screenUniforms = useUniforms(() => ({
     map: uniformTexture(drawFbo.texture)
@@ -75,7 +88,7 @@ function Scene() {
     mat.colorNode = texture(screenUniforms.map, uv())
   }, [])
   
-  useQuadShader({
+  const drawApi = useQuadShader({
     material: drawMaterial,
     renderTarget: drawFbo,
     autoRender: true,
@@ -83,8 +96,25 @@ function Scene() {
     beforeRender: () => {
       uniforms.feedbackMap.value = drawFbo.read.texture
     },
-    priority: 1
   })
+
+  useFrame((state, delta) => {
+    const currentMousePosition = state.pointer
+    const lastPos = lastMousePosition.current
+    
+    // Render multiple times, interpolating mouse position between last and current
+    for (let i = 0; i < RENDERS_PER_FRAME; i++) {
+      const t = (i + 1) / RENDERS_PER_FRAME
+      const interpolatedX = lastPos.x + (currentMousePosition.x - lastPos.x) * t
+      const interpolatedY = lastPos.y + (currentMousePosition.y - lastPos.y) * t
+      
+      uniforms.mouseUv.value.set(interpolatedX, interpolatedY)
+      drawApi.render(delta)
+    }
+    
+    // Update last mouse position to current after all renders
+    lastMousePosition.current.set(currentMousePosition.x, currentMousePosition.y)
+  }, 1)
 
   useQuadShader({
     material: screenMaterial,

@@ -307,6 +307,25 @@ useFrame((_, delta) => {
 });
 ```
 
+```tsx
+const drawApi = useQuadShader({
+  material: drawMaterial,
+  renderTarget: drawFbo,
+  autoRender: true,
+  autoSwap: true,
+  beforeRender: () => {
+    uniforms.feedbackMap.value = drawFbo.read.texture
+  },
+})
+
+useFrame((_, delta) => {
+  // render 3 times instead of 1
+  drawApi.render(delta)
+  drawApi.render(delta)
+  drawApi.render(delta)
+}, 1)
+```
+
 ### Render to Screen (Fullscreen Postprocessing)
 
 Pass `null` as renderTarget to render directly to screen. This is useful for fullscreen postprocessing effects:
