@@ -11,7 +11,6 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useRef } from "react";
 import { HalfFloatType, Vector2 } from "three";
 import {
-  abs,
   clamp,
   float,
   Fn,
@@ -47,7 +46,7 @@ export default function FlowWavesPage() {
   );
 }
 
-const RENDERS_PER_FRAME = 4;
+const RENDERS_PER_FRAME = 2;
 const PI = Math.PI;
 
 function Scene() {
@@ -196,33 +195,25 @@ function Scene() {
       const colorFn = Fn(() => {
         const sample = texture(screenUniforms.map, uv());
 
-        // Convert height to visual representation
         // Height is stored in x channel, centered around 0.5
         const height = sample.x.sub(0.5).mul(2.0); // -1 to 1 range
 
-        // Create gradient based on height
-        // Deep teal for valleys, bright cyan for peaks
-        const deepColor = vec3(0.02, 0.08, 0.15);
-        const midColor = vec3(0.05, 0.2, 0.35);
-        const highColor = vec3(0.1, 0.85, 0.95);
-        const peakColor = vec3(0.95, 0.98, 1.0);
+        // Debug colors: red if above, green if below, black otherwise
+        const red = vec3(1, 0, 0);
+        const green = vec3(0, 1, 0);
+        const black = vec3(0, 0, 0);
 
-        // Smooth interpolation between colors
-        const normalizedHeight = height.mul(0.5).add(0.5); // 0 to 1
+        // Above surface (positive height) = red
+        // Below surface (negative height) = green
+        const aboveSurface = height.greaterThan(0.01);
+        const belowSurface = height.lessThan(-0.01);
 
-        const belowMid = smoothstep(float(0), float(0.5), normalizedHeight);
-        const aboveMid = smoothstep(float(0.5), float(0.8), normalizedHeight);
-        const peak = smoothstep(float(0.8), float(1.0), normalizedHeight);
+        const col = aboveSurface.select(
+          red,
+          belowSurface.select(green, black)
+        );
 
-        const col1 = mix(deepColor, midColor, belowMid);
-        const col2 = mix(col1, highColor, aboveMid);
-        const col3 = mix(col2, peakColor, peak);
-
-        // Add subtle gradient based on wave derivative (approximated from height)
-        const intensity = abs(height).mul(0.5).add(0.5);
-        const finalCol = col3.mul(intensity.add(0.5));
-
-        return vec4(finalCol, float(1));
+        return vec4(col, float(1));
       });
 
       mat.colorNode = colorFn();
