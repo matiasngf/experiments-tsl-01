@@ -3,12 +3,12 @@
  
 "use client";
 
-import { useDoubleFbo, useFbo, useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { useDoubleFbo, useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { Suspense } from "react";
 import OperatorNode from "three/src/nodes/math/OperatorNode.js";
-import { sample, texture, uniform, uniformTexture, uv, vec2, vec3 } from "three/tsl";
-import { JoinNode, MeshBasicNodeMaterial, Vector2, WebGPURenderer } from "three/webgpu";
+import { texture, uniform, uniformTexture, uv, vec2, vec3 } from "three/tsl";
+import { JoinNode, MeshBasicNodeMaterial, WebGPURenderer } from "three/webgpu";
 
 export default function DoubleFboTestPage() {
   return (

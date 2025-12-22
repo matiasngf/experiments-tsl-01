@@ -154,62 +154,68 @@ useFrame(({ gl, scene, camera }) => {
 
 ### Sampling from DoubleFbo with useQuadShader
 
-When rendering to a DoubleFbo and displaying the result, use `uniformTexture()` to create a texture uniform that can be updated after each buffer swap. The `afterRender` callback ensures the display material always samples from the latest swapped buffer:
+When rendering to a DoubleFbo, use `uniformTexture()` to create texture uniforms. Each QuadShader updates its own texture uniforms in `beforeRender` to ensure it samples the latest buffer. Use `priority` to control render order (lower priority renders first):
 
 ```tsx
 import { useDoubleFbo, useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
-import { texture, uniformTexture, uv, vec2 } from "three/tsl";
+import { texture, uniform, uniformTexture, uv, vec2 } from "three/tsl";
 import { MeshBasicNodeMaterial } from "three/webgpu";
 
 function Scene() {
-  const { viewport } = useThree();
-
-  // Create the double FBO for ping-pong rendering
   const drawFbo = useDoubleFbo();
 
-  // Material that renders to the FBO
-  const drawMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
-    // Your shader logic here
-    mat.colorNode = uv(); // Example: gradient
-  }, []);
+  const uniforms = useUniforms(() => ({
+    feedbackMap: uniformTexture(drawFbo.read.texture),
+    mouseUv: uniform(vec2(0)),
+  }));
 
-  // Create a texture uniform from the FBO's read texture
+  // Material that renders to the FBO (reads from previous frame)
+  const drawMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
+    const feedback = texture(uniforms.feedbackMap, uv());
+    mat.colorNode = feedback.mul(0.9); // Example: fade effect
+  }, [uniforms]);
+
   const screenUniforms = useUniforms(() => ({
     map: uniformTexture(drawFbo.texture)
   }));
 
-  // Material that displays the FBO result
+  // Material that displays the FBO result to screen
   const screenMaterial = useMaterial(MeshBasicNodeMaterial, (mat) => {
     mat.colorNode = texture(screenUniforms.map, uv());
   }, []);
 
-  // Render to the DoubleFbo with automatic swapping
+  // First pass: render to DoubleFbo
   useQuadShader({
     material: drawMaterial,
     renderTarget: drawFbo,
-    autoRender: true,
     autoSwap: true,
-    // CRITICAL: Update the texture uniform AFTER the swap
-    // This ensures the display material samples the latest buffer
-    afterRender: () => {
-      screenUniforms.map.value = drawFbo.texture;
-    }
+    beforeRender: () => {
+      uniforms.feedbackMap.value = drawFbo.read.texture;
+    },
+    priority: 1, // Renders first
   });
 
-  return (
-    <mesh material={screenMaterial}>
-      <planeGeometry args={[viewport.width, viewport.height]} />
-    </mesh>
-  );
+  // Second pass: render to screen (fullscreen postprocessing)
+  useQuadShader({
+    material: screenMaterial,
+    renderTarget: null, // Renders to screen
+    beforeRender: () => {
+      screenUniforms.map.value = drawFbo.read.texture;
+    },
+    priority: 2, // Renders second
+  });
+
+  return null; // All rendering handled by quadShaders
 }
 ```
 
 **Key Points:**
 - `uniformTexture(texture)` - Creates a texture uniform node that can be updated at runtime
 - `texture(uniformNode, uv())` - Samples from the texture stored in the uniform
+- `beforeRender` - Update texture uniforms here to sample the latest buffer before each render
+- `priority` - Controls render order (lower numbers render first)
+- `renderTarget: null` - Renders to screen as a fullscreen postprocessing effect
 - `autoSwap: true` - Automatically calls `doubleFbo.swap()` after rendering
-- `afterRender` - Callback that runs after render (and after swap if `autoSwap: true`)
-- Update `screenUniforms.map.value` in `afterRender` to avoid "low FPS" appearance from sampling stale buffers
 
 ---
 
@@ -301,25 +307,27 @@ useFrame((_, delta) => {
 });
 ```
 
-### Render to Screen
+### Render to Screen (Fullscreen Postprocessing)
 
-Pass `null` as renderTarget to render directly to screen:
+Pass `null` as renderTarget to render directly to screen. This is useful for fullscreen postprocessing effects:
 
 ```tsx
 useQuadShader({
   material: postProcessMaterial,
   renderTarget: null, // Renders to screen
+  priority: 10, // Higher priority to render after other passes
 });
 ```
 
 **Options:**
 - `material` - The NodeMaterial to apply to the quad
-- `renderTarget` - RenderTarget, DoubleFbo, ref, or null (screen)
+- `renderTarget` - RenderTarget, DoubleFbo, ref, or `null` (renders to screen as fullscreen postprocessing)
 - `autoRender` - Auto-render each frame (default: true)
 - `autoSwap` - Auto-swap DoubleFbo buffers after render (default: false)
-- `priority` - Render loop priority
+- `priority` - Render loop priority (lower numbers render first)
 - `clear` - Clear before rendering (default: true)
-- `beforeRender` / `afterRender` - Lifecycle callbacks (afterRender runs after swap when `autoSwap: true`)
+- `beforeRender` - Update texture uniforms here before each render
+- `afterRender` - Callback after render (runs after swap when `autoSwap: true`)
 
 ---
 
