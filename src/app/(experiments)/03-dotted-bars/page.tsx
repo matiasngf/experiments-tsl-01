@@ -1,0 +1,277 @@
+/* eslint-disable react-hooks/immutability */
+"use client";
+
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Suspense, useEffect } from "react";
+import { WebGPURenderer, MeshBasicNodeMaterial, Node } from "three/webgpu";
+import { uv, float, smoothstep, mix, renderOutput, hash, vec2, vec3, mx_worley_noise_float, abs, fract, floor } from "three/tsl";
+import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
+import { useAnime } from "@/lib/anime/use-anime";
+import { animate, cubicBezier } from "animejs";
+import { useControls } from "leva";
+import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
+import { useUniforms, useMaterial, cellSampling, rotateUV } from "@/lib/tsl";
+import MathNode from "three/src/nodes/math/MathNode.js";
+import OperatorNode from "three/src/nodes/math/OperatorNode.js";
+
+// ============================================================================
+// Diagonal Line Sampling - Local to this experiment
+// ============================================================================
+
+interface DiagonalLineSamplingResult {
+  sampledUV: Node;
+  cellIndex: MathNode;
+  localUV: Node;
+  rotatedUV: OperatorNode;
+}
+
+/**
+ * Creates diagonal line sampling by rotating UV and compressing Y axis.
+ * Rotates UV, compresses Y to 0, and samples a grid for stripe patterns like /////
+ */
+function diagonalLineSampling(
+  angle: number | Node,
+  divisions: Node,
+  aspect: Node
+): DiagonalLineSamplingResult {
+  // Rotate UV around center
+  const rotatedUV = rotateUV(uv(), angle);
+
+  // Compress Y to 0 - creates uniform vertical stripes in rotated space
+  // which appear as diagonal stripes in screen space
+  const compressedUV = vec2(rotatedUV.x, float(0.5));
+
+  // Scale by divisions (account for aspect ratio for uniform spacing)
+  const xDivisions = divisions.mul(aspect);
+  const scaledX = compressedUV.x.mul(xDivisions);
+
+  // Cell index (which stripe we're in)
+  const cellIndex = floor(scaledX);
+
+  // Local UV within stripe (-0.5 to 0.5)
+  const localX = fract(scaledX).sub(0.5);
+  const localUV = vec2(localX, float(0));
+
+  // Sampled UV (center of each stripe)
+  const sampledUV = cellIndex.add(0.5).div(xDivisions);
+
+  return {
+    sampledUV,
+    cellIndex,
+    localUV,
+    rotatedUV,
+  };
+}
+
+// ============================================================================
+
+export default function DottedGridPage() {
+  return (
+    <div className="w-screen h-screen bg-black">
+      <Canvas
+        gl={async (props) => {
+          const renderer = new WebGPURenderer(props as never);
+          await renderer.init();
+          return renderer;
+        }}
+      >
+        <Suspense fallback={null}>
+          <Scene />
+        </Suspense>
+      </Canvas>
+    </div>
+  );
+}
+
+function Scene() {
+  const { postEnabled } = useControls({
+    postEnabled: {
+      value: true,
+      label: "PostProcessing",
+    },
+  });
+  const { postProcessing, scenePass } = usePostProcessing({
+    enabled: postEnabled,
+  });
+
+  const { bloomNode } = useBloomPass(scenePass, {
+    strength: 0.7,
+    threshold: 0.2,
+    radius: 0.2,
+  });
+
+  // Chain postprocessing passes
+  useEffect(() => {
+    const sceneColor = scenePass.getTextureNode("output");
+    postProcessing.outputNode = renderOutput(sceneColor.add(bloomNode));
+  }, [postProcessing, scenePass, bloomNode]);
+
+  return (
+    <>
+      <DottedGrid />
+    </>
+  );
+}
+
+function DottedGrid() {
+  const { viewport } = useThree();
+
+  const aspect = viewport.width / viewport.height;
+
+  // TSL uniforms using useUniforms hook
+  const uniforms = useUniforms({
+    time: 0,
+    reveal: 1,
+    dotSize: 0.38,
+    gridScale: 50,
+    debugBackground: 0,
+    aspect: aspect,
+    // Diagonal lines
+    lineCount: 4  ,
+    lineWidth: 1.1,
+    lineAngle: Math.PI / 6, // 30 degrees
+  });
+
+  // Leva controls with onChange for direct uniform updates
+  useControls({
+    debugBackground: {
+      value: false,
+      label: "Debug Background",
+      onChange: (v: boolean) => {
+        uniforms.debugBackground.value = v ? 1 : 0;
+      },
+    },
+    dotSize: {
+      value: 0.38,
+      min: 0,
+      max: 1,
+      step: 0.01,
+      label: "Dot Size",
+      onChange: (v: number) => {
+        uniforms.dotSize.value = v;
+      },
+    },
+    gridScale: {
+      value: 50,
+      min: 2,
+      max: 50,
+      step: 1,
+      label: "Grid Scale",
+      onChange: (v: number) => {
+        uniforms.gridScale.value = v;
+      },
+    },
+    lineCount: {
+      value: 4,
+      min: 2,
+      max: 40,
+      step: 1,
+      label: "Line Count",
+      onChange: (v: number) => {
+        uniforms.lineCount.value = v;
+      },
+    },
+    lineAngle: {
+      value: 30,
+      min: 0,
+      max: 90,
+      step: 1,
+      label: "Line Angle (deg)",
+      onChange: (v: number) => {
+        uniforms.lineAngle.value = (v * Math.PI) / 180;
+      },
+    },
+  });
+
+  // Anime.js for smooth animations
+  const scope = useAnime({
+    methods: {
+      reveal: () => {
+        return 
+        animate(uniforms.reveal, {
+          value: 1,
+          duration: 2000,
+          ease: cubicBezier(0.25, 0.1, 0.25, 1),
+        });
+        animate(uniforms.gridScale, {
+          value: 20,
+          duration: 2500,
+          ease: cubicBezier(0.25, 0.1, 0.25, 1),
+        });
+      },
+    },
+  });
+
+  // Update time and aspect uniforms each frame
+  useFrame((state) => {
+    uniforms.time.value = state.clock.elapsedTime;
+    uniforms.aspect.value = state.viewport.width / state.viewport.height;
+  });
+
+  // Create dotted grid material with TSL using useMaterial hook
+  const material = useMaterial(
+    MeshBasicNodeMaterial,
+    (mat) => {
+      // === Background with diagonal stripes ===
+      // This gets sampled at cell centers for the pixelation effect
+      const backgroundFn = (uvCoord: Node) => {
+        // Diagonal stripes: rotate UV and compress Y
+        const rotatedUV = rotateUV(uvCoord, uniforms.lineAngle);
+        const scaledX = rotatedUV.x.mul(uniforms.lineCount).mul(uniforms.aspect);
+        const lineLocalX = fract(scaledX).sub(0.5);
+        const lineCellIndex = floor(scaledX);
+
+        // Stripe SDF
+        const halfWidth = uniforms.lineWidth.mul(0.5);
+        const stripeDistance = abs(lineLocalX);
+        const stripe = smoothstep(halfWidth, halfWidth.sub(0.02), stripeDistance);
+
+        // Random brightness per stripe using line index
+        const lineHash = hash(lineCellIndex.add(42));
+
+        // Base noise
+        const scaledUv = uvCoord.mul(100);
+        const noise2d = mx_worley_noise_float(scaledUv);
+
+        // Combine: stripes with random hash brightness
+        const stripeColor = vec3(0.6, 0.65, 0.75).mul(stripe).mul(lineHash);
+        const baseColor = vec3(0.1).add(noise2d.mul(0.1));
+
+        return mix(baseColor, stripeColor.add(baseColor), stripe);
+      };
+
+      // Cell sampling for pixelated grid with perfectly square cells
+      const { cellCenterUV, localUV } = cellSampling(
+        uniforms.gridScale,
+        uniforms.aspect
+      );
+
+      // Sample background at cell center (pixelation effect)
+      // The diagonal stripes are now part of this sampled background
+      const cellColor = backgroundFn(cellCenterUV);
+
+      // Dot SDF with animated size
+      const radius = uniforms.dotSize.mul(0.5);
+      const dist = localUV.length();
+      const dot = smoothstep(radius, radius.sub(0.05), dist);
+
+      // Final output: dots sample the background (with stripes baked in)
+      const dotOutput = cellColor.mul(dot);
+
+      // Conditional output: debug shows raw background, normal shows dots
+      const debugOutput = backgroundFn(uv()).mul(uniforms.reveal);
+      const finalColor = mix(dotOutput.mul(uniforms.reveal), debugOutput, uniforms.debugBackground);
+
+      mat.colorNode = finalColor;
+      mat.transparent = true;
+      mat.opacityNode = mix(dot, float(1), uniforms.debugBackground).mul(uniforms.reveal);
+    },
+    [uniforms]
+  );
+
+  return (
+    <mesh material={material}>
+      <planeGeometry args={[viewport.width, viewport.height]} />
+    </mesh>
+  );
+}

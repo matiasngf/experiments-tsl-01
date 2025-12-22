@@ -22,4 +22,5 @@ export {
 // TSL Functions
 export { cellSampling } from "./cell-sampling";
 export type { CellSamplingResult } from "./cell-sampling";
+export { rotateUV } from "./rotate-uv";
 
