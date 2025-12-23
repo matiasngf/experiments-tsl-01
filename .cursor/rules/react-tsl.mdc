@@ -114,6 +114,58 @@ useFrame(({ gl, scene, camera }) => {
 });
 ```
 
+### HDR / Unclamped Render Targets (For Simulations)
+
+When doing GPU calculations that require unclamped values (e.g., water simulations, fluid dynamics, accumulation effects), the default render target configuration will **clamp and tonemap values**, causing incorrect results.
+
+**Solution:**
+
+1. Use `NodeMaterial` instead of `MeshBasicNodeMaterial` (simpler, no tonemapping)
+2. Configure render targets with `HalfFloatType` and `NoColorSpace`
+
+```tsx
+import { useFbo, useDoubleFbo } from "@/lib/tsl";
+import { HalfFloatType, NoColorSpace } from "three";
+
+// For single FBO
+const simulationFbo = useFbo({
+  width: 512,
+  height: 512,
+  type: HalfFloatType,
+  colorSpace: NoColorSpace,
+});
+
+// For double FBO (ping-pong)
+const doubleFbo = useDoubleFbo({
+  width: 512,
+  height: 512,
+  type: HalfFloatType,
+  colorSpace: NoColorSpace,
+});
+```
+
+**Material for simulations:**
+
+```tsx
+import { NodeMaterial } from "three/webgpu";
+
+// Use NodeMaterial instead of MeshBasicNodeMaterial for simulation passes
+const simulationMaterial = useMaterial(NodeMaterial, (mat) => {
+  // Your simulation logic - values won't be clamped or tonemapped
+  mat.colorNode = yourSimulationOutput;
+}, []);
+```
+
+**When to use HDR configuration:**
+
+| Use Case | Needs HDR Config |
+|----------|------------------|
+| Visual effects (trails, glow) | No |
+| Water/fluid simulation | **Yes** |
+| Physics calculations | **Yes** |
+| Accumulation buffers | **Yes** |
+| Height field storage | **Yes** |
+
 ---
 
 ## useDoubleFbo
@@ -560,7 +612,8 @@ import { positionWorld, positionLocal, normalWorld, normalLocal } from "three/ts
 
 // Materials
 import {
-  MeshBasicNodeMaterial,
+  NodeMaterial,              // Base material - no tonemapping (use for simulations)
+  MeshBasicNodeMaterial,     // Basic lit material
   MeshPhysicalNodeMaterial,
   MeshStandardNodeMaterial,
   Node,

@@ -9,7 +9,7 @@ import {
 } from "@/lib/tsl";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useRef } from "react";
-import { HalfFloatType, Vector2 } from "three";
+import { HalfFloatType, NoColorSpace, Vector2 } from "three";
 import {
   clamp,
   float,
@@ -26,7 +26,7 @@ import {
   vec3,
   vec4,
 } from "three/tsl";
-import { MeshBasicNodeMaterial, WebGPURenderer } from "three/webgpu";
+import { MeshBasicNodeMaterial, NodeMaterial, WebGPURenderer } from "three/webgpu";
 
 export default function FlowWavesPage() {
   return (
@@ -52,7 +52,8 @@ const PI = Math.PI;
 function Scene() {
   const { size } = useThree();
   const drawFbo = useDoubleFbo({
-    type: HalfFloatType
+    type: HalfFloatType,
+    colorSpace: NoColorSpace,
   });
   const lastMousePosition = useRef(new Vector2(0, 0));
   const mouseVelocity = useRef(0);
@@ -71,8 +72,9 @@ function Scene() {
   // Update resolution when size changes
   uniforms.resolution.value.set(size.width, size.height);
 
+  // Use NodeMaterial instead of MeshBasicNodeMaterial to avoid tonemapping/clamping
   const drawMaterial = useMaterial(
-    MeshBasicNodeMaterial,
+    NodeMaterial,
     (mat) => {
       const colorFn = Fn(() => {
         const frame = uniforms.frame;

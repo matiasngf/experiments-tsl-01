@@ -237,3 +237,28 @@ fbo.write      // RenderTarget to write to (current frame)
 fbo.texture    // Shorthand for fbo.read.texture
 fbo.swap()     // Swap read/write buffers (handled by autoSwap)
 ```
+
+### HDR / Unclamped Values for Simulations
+
+When doing calculations that require unclamped values (water effects, physics simulations, accumulation), use `HalfFloatType` and `NoColorSpace` to prevent tonemapping and clamping:
+
+```typescript
+import { HalfFloatType, NoColorSpace } from "three";
+import { NodeMaterial } from "three/webgpu";
+
+// Configure FBO for simulation data
+const simulationFbo = useDoubleFbo({
+  width: 512,
+  height: 512,
+  type: HalfFloatType,
+  colorSpace: NoColorSpace,
+});
+
+// Use NodeMaterial instead of MeshBasicNodeMaterial
+// NodeMaterial doesn't apply tonemapping or clamping
+const simulationMaterial = useMaterial(NodeMaterial, (mat) => {
+  mat.colorNode = yourSimulationLogic;
+}, []);
+```
+
+**Important:** `MeshBasicNodeMaterial` applies tonemapping and clamps values to 0-1. For simulation passes where you need raw float data, always use `NodeMaterial`.
