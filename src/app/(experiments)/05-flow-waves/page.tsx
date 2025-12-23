@@ -37,17 +37,13 @@ export default function FlowWavesPage() {
 }
 
 function Scene() {
-  const { size } = useThree();
   const lastMousePosition = useRef(new Vector2(0, 0));
   const mouseVelocity = useRef(0);
 
   const { uniforms, render, result } = useWaves({
-    width: size.width,
-    height: size.height,
+    width: 500,
+    height: 500,
   });
-
-  // Update resolution when size changes
-  uniforms.resolution.value.set(size.width, size.height);
 
   // Screen display material
   const screenUniforms = useUniforms(() => ({
@@ -66,7 +62,7 @@ function Scene() {
         const positive = height.max(0).mul(scale);
         const negative = height.negate().max(0).mul(scale);
 
-        return vec4(vec3(positive, negative, 0), float(1));
+        return vec4(vec3(positive, negative, sample.b), float(1));
       });
 
       mat.colorNode = colorFn();

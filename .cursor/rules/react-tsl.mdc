@@ -15,14 +15,13 @@ Creates memoized TSL uniform nodes from initial values. Creating the uniforms wi
 
 ```tsx
 import { useUniforms } from "@/lib/tsl";
-import { Color, Vector2 } from "three";
+import { Color } from "three";
 
 function MyMesh() {
   const uniforms = useUniforms(() => ({
     time: uniform(0),
     intensity: uniform(1.5),
     baseColor: uniform(new Color(0xff0000)),
-    resolution: uniform(new Vector2(1920, 1080)),
   }));
 
   // Update uniforms each frame
@@ -578,6 +577,7 @@ import {
   float,
   uv,
   time,
+  screenSize,  // Current render target dimensions (not final screen size!)
   Fn,
   struct,
   texture,
@@ -622,6 +622,34 @@ import {
 
 ---
 
+## Built-in Nodes
+
+### screenSize - Automatic Render Target Resolution
+
+The `screenSize` node automatically provides the dimensions of the **current render target**, not the final screen size. This means:
+
+- When rendering to a 500×500 FBO, `screenSize` returns `vec2(500, 500)`
+- When rendering to screen, `screenSize` returns the canvas dimensions
+- **No need for manual `resolution` uniforms** - just use `screenSize`
+
+```tsx
+import { screenSize, uv } from "three/tsl";
+
+// Aspect correction for circular shapes
+const aspectFix = screenSize.x.div(screenSize.y);
+const correctedUv = uv().mul(vec2(aspectFix, 1));
+
+// Pixel-perfect calculations
+const pixelCoord = uv().mul(screenSize);
+```
+
+This is especially useful for:
+- Aspect ratio correction in effects
+- FBO-based simulations where resolution may differ from screen
+- Pixel-perfect SDF calculations
+
+---
+
 ## Key Differences from WebGL
 
 | Aspect | WebGL | TSL |
@@ -633,6 +661,7 @@ import {
 | Color ops | GLSL: `vec3 * float` | TSL: `color.mul(float)` |
 | Update | `uniform.value = x` | Same: `uniformNode.value = x` |
 | Render target | `WebGLRenderTarget` | `RenderTarget` (from `three/webgpu`) |
+| Resolution | Manual uniform | Use `screenSize` (auto-updates per RT) |
 
 ---
 

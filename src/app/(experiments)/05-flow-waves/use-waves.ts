@@ -13,6 +13,7 @@ import {
   Fn,
   length,
   mx_noise_float,
+  screenSize,
   texture,
   time,
   uniform,
@@ -43,8 +44,6 @@ export interface WaveUniforms {
   mouseUv: UniformNode<Vector2>;
   /** Mouse velocity (speed of movement) */
   mouseVelocity: UniformNode<number>;
-  /** Resolution of the simulation */
-  resolution: UniformNode<Vector2>;
 }
 
 export interface UseWavesResult {
@@ -90,19 +89,17 @@ export function useWaves({
     feedbackMap: uniformTexture(drawFbo.read.texture),
     mouseUv: uniform(new Vector2(0, 0)),
     mouseVelocity: uniform(0),
-    resolution: uniform(new Vector2(width ?? 1, height ?? 1)),
   }));
 
   const drawMaterial = useMaterial(
     NodeMaterial,
     (mat) => {
       const simulateFn = Fn(() => {
-        const resolution = uniforms.resolution;
         const alphaSq = float(ALPHA_SQ);
         const damping = float(DAMPING);
 
-        // Texel size for sampling neighbors
-        const texelSize = vec2(1.0).div(resolution);
+        // Texel size for sampling neighbors (screenSize = current render target dimensions)
+        const texelSize = vec2(1.0).div(screenSize);
         const q = uv();
         const sampleUv = q.flipY();
 
@@ -159,28 +156,35 @@ export function useWaves({
           mousePos.y.add(1).mul(0.5)
         );
 
-        // Distance from current pixel to mouse
-        const toMouse = q.sub(mouseUvPos);
+        // Aspect ratio correction for circular mouse influence
+        const aspect = screenSize.x.div(screenSize.y);
+        
+        // Scale UV coordinates by aspect ratio for distance calculation
+        const aspectCorrectedUv = vec2(q.x.mul(aspect), q.y);
+        const aspectCorrectedMouse = vec2(mouseUvPos.x.mul(aspect), mouseUvPos.y);
+        
+        // Distance from current pixel to mouse (aspect-corrected)
+        const toMouse = aspectCorrectedUv.sub(aspectCorrectedMouse);
         const dist = length(toMouse);
 
-        // Mouse influence radius
+        // Mouse influence radius (in vertical UV units, so it's consistent)
         const mouseRadius = float(0.06);
 
         // === Add noise to the influence ===
-        // High frequency noise for surface variation
+        // High frequency noise for surface variation (aspect-corrected)
         const noiseScale = float(40.0);
         const noiseSpeed = float(1.0);
         const noiseCoord = vec3(
-          q.x.mul(noiseScale),
+          q.x.mul(aspect).mul(noiseScale),
           q.y.mul(noiseScale),
           time.mul(noiseSpeed)
         );
         const surfaceNoise = mx_noise_float(noiseCoord);
 
-        // Low frequency noise for organic shape distortion
+        // Low frequency noise for organic shape distortion (aspect-corrected)
         const shapeNoiseScale = float(8.0);
         const shapeCoord = vec3(
-          q.x.mul(shapeNoiseScale),
+          q.x.mul(aspect).mul(shapeNoiseScale),
           q.y.mul(shapeNoiseScale),
           time.mul(1.5)
         );
@@ -214,7 +218,7 @@ export function useWaves({
         const u_final = u_new.add(mouseDisplacement);
 
         // Store: x = new height (becomes u next frame), y = current height (becomes u_prev), z = noise debug
-        const result = vec4(u_final, u, surfaceNoise, float(1));
+        const result = vec4(u_final, u, screenSize.x.greaterThan(500).select(1,0), float(1));
 
         return result;
       });
@@ -239,7 +243,6 @@ export function useWaves({
     uniforms: {
       mouseUv: uniforms.mouseUv,
       mouseVelocity: uniforms.mouseVelocity,
-      resolution: uniforms.resolution,
     },
     render: drawApi.render,
     result: drawFbo,

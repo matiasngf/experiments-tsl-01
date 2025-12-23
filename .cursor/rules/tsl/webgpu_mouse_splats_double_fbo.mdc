@@ -179,6 +179,8 @@ const center = uniforms.mouseUv.mul(vec2(aspectFix, 1));
 const screenSpace = uv().mul(2).sub(1).mul(vec2(aspectFix, 1));
 ```
 
+> **Note:** `screenSize` automatically reflects the dimensions of the current render target, not the final screen size. When rendering to a 500×500 FBO, `screenSize` is `vec2(500, 500)`. No need for manual resolution uniforms!
+
 ### UV FlipY for Feedback Textures
 
 When sampling the previous frame, flip Y to match texture orientation:

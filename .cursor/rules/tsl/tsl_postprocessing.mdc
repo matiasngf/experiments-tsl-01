@@ -251,7 +251,7 @@ import {
   vec4,
   sin,
   cos,
-  screenSize,
+  screenSize,  // Note: reflects current render target size, not final screen!
 } from "three/tsl";
 
 class VignetteNode extends TempNode {
@@ -596,6 +596,7 @@ Key takeaways for TSL postprocessing with React:
 4. **Dispose resources on unmount** - Prevent memory leaks
 5. **Mind the effect order** - Especially for color space (linear vs sRGB)
 6. **Use MRT for advanced effects** - Share geometry pass for multiple effects
+7. **Use `screenSize` for resolution** - It automatically reflects the current render target dimensions, not the final screen. No need for manual resolution uniforms!
 
 For the full list of effects and examples, see:
 

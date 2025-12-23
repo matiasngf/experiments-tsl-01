@@ -349,3 +349,4 @@ const dofPass = dof(colorTexture, scenePass.getViewZNode(), ...);
 4. **Dispose resources in cleanup** - Prevent WebGPU memory leaks
 5. **Separate structure from values** - Only recreate graph when effects toggle
 6. **Mind effect ordering** - Linear space effects before tone mapping, AA last
+7. **Use `screenSize` for resolution** - The `screenSize` node automatically reflects the current render target dimensions (not final screen size). No need for manual resolution uniforms!

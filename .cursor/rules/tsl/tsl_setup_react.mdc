@@ -274,6 +274,7 @@ import {
   float,
   uv,
   time,
+  screenSize,  // Dimensions of current render target (not screen!)
   Fn,
   struct,
 } from "three/tsl";
@@ -351,3 +352,4 @@ function Scene() {
 4. **uniform() for dynamic values**: Update `.value` without recreating materials
 5. **Fn for reusable logic**: Encapsulate shader operations
 6. **struct for multi-returns**: When Fn needs to return multiple values
+7. **screenSize for resolution**: Use `screenSize` instead of manual resolution uniforms - it automatically reflects the current render target dimensions (not the final screen size)
