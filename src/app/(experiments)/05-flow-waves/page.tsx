@@ -1,21 +1,13 @@
 /* eslint-disable react-hooks/immutability */
+ 
 "use client";
 
-import { useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
+import { Environment, OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Suspense, useRef } from "react";
 import { Vector2 } from "three";
-import {
-  float,
-  Fn,
-  texture,
-  uniformTexture,
-  uv,
-  vec3,
-  vec4,
-} from "three/tsl";
-import { MeshBasicNodeMaterial } from "three/webgpu";
 import { useWaves } from "./use-waves";
+import { WaterMesh } from "./water-mesh";
 
 export default function FlowWavesPage() {
   return (
@@ -37,75 +29,69 @@ export default function FlowWavesPage() {
 }
 
 function Scene() {
-  const lastMousePosition = useRef(new Vector2(0, 0));
-  const mouseVelocity = useRef(0);
-
-  const { uniforms: wavesUniforms, render: renderWaves, result: wavesResult } = useWaves({
+  const {
+    uniforms: wavesUniforms,
+    render: renderWaves,
+    result: wavesResult,
+  } = useWaves({
     width: 500,
     height: 500,
   });
 
-  // Screen display material
-  const screenUniforms = useUniforms(() => ({
-    map: uniformTexture(wavesResult.texture),
-  }));
+  // Mouse tracking refs
+  const currentMouseUv = useRef(new Vector2(0, 0));
+  const prevMouseUv = useRef(new Vector2(0, 0));
+  const mouseVelocity = useRef(0);
 
-  const screenMaterial = useMaterial(
-    MeshBasicNodeMaterial,
-    (mat) => {
-      const colorFn = Fn(() => {
-        const sample = texture(screenUniforms.map, uv());
-        const height = sample.x;
-
-        // Visualize: Red = positive (peak), Green = negative (trough)
-        const scale = float(5.0);
-        const positive = height.max(0).mul(scale);
-        const negative = height.negate().max(0).mul(scale);
-
-        return vec4(vec3(positive, negative, sample.b), float(1));
-      });
-
-      mat.colorNode = colorFn();
-    },
-    [screenUniforms]
-  );
-
+  // Run simulation each frame
   useFrame((state, delta) => {
-    const pointer = state.pointer;
-    const lastPos = lastMousePosition.current;
-
-    // Calculate velocity
-    const dx = pointer.x - lastPos.x;
-    const dy = pointer.y - lastPos.y;
+    // Calculate velocity from UV delta
+    const dx = currentMouseUv.current.x - prevMouseUv.current.x;
+    const dy = currentMouseUv.current.y - prevMouseUv.current.y;
     const speed = Math.sqrt(dx * dx + dy * dy);
 
-    // Smooth velocity with fast attack, slow decay
+    // Update velocity with smoothing
     if (speed > mouseVelocity.current) {
       mouseVelocity.current = speed;
     } else {
       mouseVelocity.current *= 0.95;
     }
 
-    // Update uniforms
+    // Convert UV (0-1) to NDC (-1 to 1)
+    const ndcX = currentMouseUv.current.x * 2 - 1;
+    const ndcY = -(currentMouseUv.current.y * 2 - 1); // Flip Y
+
+    // Update wave uniforms
+    wavesUniforms.mouseUv.value.set(ndcX, ndcY);
     wavesUniforms.mouseVelocity.value = mouseVelocity.current;
-    wavesUniforms.mouseUv.value.set(pointer.x, -pointer.y);
 
-    // Run simulation
+    // Store current as prev for next frame
+    prevMouseUv.current.copy(currentMouseUv.current);
+
+    // Render wave simulation
     renderWaves(delta);
-
-    // Update tracking
-    lastMousePosition.current.set(pointer.x, pointer.y);
+    state.gl.render(state.scene, state.camera)
   }, 1);
 
-  // Render to screen
-  useQuadShader({
-    material: screenMaterial,
-    renderTarget: null,
-    beforeRender: () => {
-      screenUniforms.map.value = wavesResult.read.texture;
-    },
-    priority: 2,
-  });
+  const handleMouseMove = (uv: { x: number; y: number }) => {
+    currentMouseUv.current.set(uv.x, uv.y);
+  };
 
-  return null
+  return (
+    <>
+      <OrbitControls target={[0,0,2]} />
+      <Environment preset="sunset" />
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[5, 5, 5]} intensity={1} />
+      <PerspectiveCamera makeDefault position={[0,5,7]} />
+
+      <WaterMesh
+        waveTextures={wavesResult}
+        onMouseMove={handleMouseMove}
+        width={20}
+        height={20}
+        scale={3}
+      />
+    </>
+  );
 }

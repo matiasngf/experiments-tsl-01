@@ -1,0 +1,377 @@
+---
+description: DenoiseNode is a post-processing effect for removing noise from screen-space effects like ambient occlusion, volumetric lighting, and ray-marched effects. It uses an edge-aware Poisson-Gaussian denoising algorithm.
+alwaysApply: false
+---
+
+# Three.js WebGPU DenoiseNode Usage Guide
+
+## Overview
+DenoiseNode is a post-processing effect for removing noise from screen-space effects like ambient occlusion, volumetric lighting, and ray-marched effects. It uses an edge-aware Poisson-Gaussian denoising algorithm.
+
+## When to Use DenoiseNode
+- **SSAO/GTAO**: Ambient occlusion passes
+- **Volumetric Lighting**: Ray-marched fog/god rays  
+- **Screen-space GI**: Global illumination effects
+- **Custom Ray-Marching**: Any noisy screen-space effect
+
+⚠️ **Performance Note**: Denoising adds overhead (16 texture samples per pixel). Make it optional in graphics settings.
+
+## Basic Setup Pattern
+
+### 1. Import Required Modules
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { pass, uniform, screenUV } from 'three/tsl';
+import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
+```
+
+### 2. Create Scene Pass with Depth & Normal Data
+
+```javascript
+// Create main scene pass
+const scenePass = pass(scene, camera);
+
+// Get depth texture node
+const scenePassDepth = scenePass.getTextureNode('depth');
+
+// Get normal texture node (optional - can be auto-computed from depth)
+const scenePassNormal = scenePass.getTextureNode('normal');
+```
+
+**Important**: WebGPU passes automatically provide depth and normal outputs. You don't need to explicitly enable them.
+
+### 3. Create Your Noisy Effect Pass
+
+Example with a custom volumetric effect:
+
+```javascript
+// Your custom noisy effect (e.g., volumetric ray marching)
+const volumetricPass = pass(scene, camera, { depthBuffer: false });
+volumetricPass.setResolutionScale(0.25); // Lower resolution for performance
+```
+
+### 4. Apply Denoising
+
+```javascript
+// Apply denoise to your noisy effect
+const denoisedResult = denoise(
+  volumetricPass,      // Input: Your noisy texture/pass
+  scenePassDepth,      // Depth information from scene
+  scenePassNormal,     // Normal information (or null for auto-compute)
+  camera               // Camera for view-space calculations
+);
+```
+
+### 5. Use in Post-Processing
+
+```javascript
+const postProcessing = new THREE.PostProcessing(renderer);
+postProcessing.outputNode = denoisedResult;
+```
+
+## Complete Working Example
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { pass, uniform, screenUV } from 'three/tsl';
+import { denoise } from 'three/addons/tsl/display/DenoiseNode.js';
+
+// Setup renderer and scene
+const renderer = new THREE.WebGPURenderer();
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 100);
+
+// Create post-processing
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// Scene pass - provides depth and normals
+const scenePass = pass(scene, camera);
+const scenePassColor = scenePass.getTextureNode(); // Main color output
+const scenePassDepth = scenePass.getTextureNode('depth');
+const scenePassNormal = scenePass.getTextureNode('normal');
+
+// Your custom noisy effect pass (volumetric, AO, etc.)
+const noisyEffectPass = pass(scene, camera, { depthBuffer: false });
+// ... configure your effect ...
+
+// Apply denoising
+const denoisedEffect = denoise(
+  noisyEffectPass,
+  scenePassDepth,
+  scenePassNormal,
+  camera
+);
+
+// Compose final output
+const finalOutput = scenePassColor.add(denoisedEffect);
+postProcessing.outputNode = finalOutput;
+```
+
+## Advanced: Customizing Denoise Parameters
+
+```javascript
+import { DenoiseNode } from 'three/addons/tsl/display/DenoiseNode.js';
+
+// Create denoise node manually for parameter control
+const denoiseNode = new DenoiseNode(
+  convertToTexture(noisyEffectPass),
+  nodeObject(scenePassDepth),
+  nodeObject(scenePassNormal),
+  camera
+);
+
+// Adjust sensitivity parameters (default: 5 for all)
+denoiseNode.lumaPhi.value = 3;    // Lower = preserve more brightness detail
+denoiseNode.depthPhi.value = 2;   // Lower = preserve depth edges better
+denoiseNode.normalPhi.value = 4;  // Lower = preserve surface orientation
+denoiseNode.radius.value = 8;     // Sampling radius (higher = more smoothing)
+
+const denoisedEffect = nodeObject(denoiseNode);
+```
+
+## Alternative: Gaussian Blur for Simpler Denoising
+
+For less critical use cases, use Gaussian blur instead:
+
+```javascript
+import { gaussianBlur } from 'three/tsl';
+
+const blurStrength = uniform(0.6);
+const blurredEffect = gaussianBlur(noisyEffectPass, blurStrength);
+```
+
+**When to use each:**
+- **DenoiseNode**: Better quality, edge-aware, preserves details (more expensive)
+- **gaussianBlur**: Simpler, faster, sufficient for heavily blurred effects
+
+## Working with Normal Data
+
+### Option 1: Use Scene Pass Normals (Recommended)
+
+```javascript
+const scenePassNormal = scenePass.getTextureNode('normal');
+const denoisedEffect = denoise(noisyPass, scenePassDepth, scenePassNormal, camera);
+```
+
+### Option 2: Auto-Compute from Depth
+
+```javascript
+// Pass null for normals - will be computed from depth
+const denoisedEffect = denoise(noisyPass, scenePassDepth, null, camera);
+```
+
+### Option 3: Convert Normal Encoding
+
+If normals are encoded as colors:
+
+```javascript
+import { colorToDirection, sample } from 'three/tsl';
+
+const scenePassNormal = scenePass.getTextureNode('normal');
+const sceneNormal = sample((uv) => {
+  return colorToDirection(scenePassNormal.sample(uv));
+});
+
+const denoisedEffect = denoise(noisyPass, scenePassDepth, sceneNormal, camera);
+```
+
+## Common Patterns for Different Effects
+
+### Pattern 1: Volumetric Lighting
+
+```javascript
+// Scene pass for depth
+const scenePass = pass(scene, camera);
+const sceneDepth = scenePass.getTextureNode('depth');
+
+// Volumetric pass with separate layer
+const volumetricPass = pass(scene, camera, { depthBuffer: false });
+volumetricPass.setLayers(volumetricLayer);
+volumetricPass.setResolutionScale(0.25);
+
+// Denoise (or blur for performance)
+const denoiseStrength = uniform(0.6);
+const denoisedVolumetric = gaussianBlur(volumetricPass, denoiseStrength);
+
+// Composite
+const finalOutput = scenePass.add(denoisedVolumetric);
+postProcessing.outputNode = finalOutput;
+```
+
+### Pattern 2: Screen-Space Effects (SSAO, SSGI)
+
+```javascript
+import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
+import { colorToDirection, sample } from 'three/tsl';
+
+const scenePass = pass(scene, camera);
+const scenePassColor = scenePass.getTextureNode();
+const scenePassDepth = scenePass.getTextureNode('depth');
+const scenePassNormal = scenePass.getTextureNode('normal');
+
+// Convert normals from color space
+const sceneNormal = sample((uv) => {
+  return colorToDirection(scenePassNormal.sample(uv));
+});
+
+// SSGI effect (has built-in noise)
+const giPass = ssgi(scenePassColor, scenePassDepth, sceneNormal, camera);
+
+// If temporal filtering is disabled, denoise manually
+if (!giPass.useTemporalFiltering) {
+  const denoisedGI = denoise(giPass, scenePassDepth, sceneNormal, camera);
+  postProcessing.outputNode = denoisedGI;
+} else {
+  postProcessing.outputNode = giPass;
+}
+```
+
+### Pattern 3: Custom Ray-Marched Effect
+
+```javascript
+// Your custom ray-marching material
+const rayMarchMaterial = new THREE.VolumeNodeMaterial();
+rayMarchMaterial.steps = 8; // Low samples = more noise
+rayMarchMaterial.scatteringNode = Fn(({ positionRay }) => {
+  // Your custom ray-marching logic
+  return customScatteringFunction(positionRay);
+});
+
+// Setup passes
+const scenePass = pass(scene, camera);
+const sceneDepth = scenePass.getTextureNode('depth');
+
+// Provide scene depth to ray marching for occlusion
+rayMarchMaterial.depthNode = sceneDepth.sample(screenUV);
+
+// Ray march pass
+const rayMarchPass = pass(scene, camera, { depthBuffer: false });
+
+// Denoise the noisy ray-marched result
+const denoisedRayMarch = denoise(
+  rayMarchPass,
+  sceneDepth,
+  null, // Auto-compute normals from depth
+  camera
+);
+
+postProcessing.outputNode = scenePass.add(denoisedRayMarch);
+```
+
+## Depth Variants
+
+Different passes provide different depth representations:
+
+```javascript
+// Raw depth texture (0-1 range)
+const depthTexture = scenePass.getTextureNode('depth');
+
+// View-space Z (actual distance from camera)
+const viewZ = scenePass.getViewZNode();
+
+// Linear depth (linearized 0-1 based on near/far)
+const linearDepth = scenePass.getLinearDepthNode();
+```
+
+**For DenoiseNode**: Use `getTextureNode('depth')` (raw depth) - the node handles conversion internally.
+
+## Making Denoising Optional
+
+Allow users to toggle denoising for performance:
+
+```javascript
+const params = { denoise: true };
+const denoiseStrength = uniform(0.6);
+
+// Pre-compute both versions
+const blurredEffect = gaussianBlur(noisyPass, denoiseStrength);
+
+// Create GUI control
+gui.add(params, 'denoise').onChange((denoise) => {
+  const effect = denoise ? blurredEffect : noisyPass;
+  postProcessing.outputNode = scenePass.add(effect);
+  postProcessing.needsUpdate = true;
+});
+```
+
+## Debugging Tips
+
+1. **Visualize intermediate passes** using `.toInspector()`:
+```javascript
+const scenePassDepth = scenePass.getTextureNode('depth').toInspector('Depth');
+const denoisedEffect = denoise(noisyPass, scenePassDepth, null, camera).toInspector('Denoised');
+```
+
+2. **Check if normals are needed**: Start with `null` for normals. Add them only if quality is insufficient.
+
+3. **Adjust phi parameters**: Start with defaults (5), then tune based on your effect:
+   - Increase phi = more aggressive smoothing
+   - Decrease phi = preserve more detail
+
+4. **Resolution scaling**: For expensive effects, render at lower resolution before denoising:
+```javascript
+noisyPass.setResolutionScale(0.5); // Half resolution
+```
+
+## API Reference Summary
+
+### Function Signature
+```typescript
+denoise(
+  node: Node,              // Input texture/pass to denoise
+  depthNode: Node<float>,  // Scene depth
+  normalNode: Node<vec3> | null,  // Scene normals (or null)
+  camera: Camera           // Camera for projection
+): DenoiseNode
+```
+
+### DenoiseNode Properties
+```javascript
+denoiseNode.lumaPhi      // UniformNode<float> - Brightness sensitivity (default: 5)
+denoiseNode.depthPhi     // UniformNode<float> - Depth sensitivity (default: 5)
+denoiseNode.normalPhi    // UniformNode<float> - Normal sensitivity (default: 5)
+denoiseNode.radius       // UniformNode<float> - Sampling radius (default: 5)
+denoiseNode.index        // UniformNode<float> - Temporal index for animation (default: 0)
+```
+
+## Common Mistakes to Avoid
+
+❌ **Don't**: Create depth/normal render targets manually
+```javascript
+// BAD - Unnecessary in WebGPU
+const depthTarget = new THREE.WebGPURenderTarget(width, height, { depthTexture: true });
+```
+
+✅ **Do**: Use pass texture nodes
+```javascript
+// GOOD - Automatic in WebGPU
+const scenePassDepth = scenePass.getTextureNode('depth');
+```
+
+❌ **Don't**: Apply denoise to the main scene render
+```javascript
+// BAD - Denoise is for noisy effects, not final render
+const denoisedScene = denoise(scenePass, scenePassDepth, null, camera);
+```
+
+✅ **Do**: Apply denoise to the noisy effect only
+```javascript
+// GOOD - Denoise the specific noisy effect
+const denoisedEffect = denoise(noisyEffectPass, scenePassDepth, null, camera);
+const finalOutput = scenePass.add(denoisedEffect);
+```
+
+❌ **Don't**: Forget to update post-processing when changing nodes
+```javascript
+// BAD - Changes won't take effect
+postProcessing.outputNode = newNode;
+```
+
+✅ **Do**: Set needsUpdate flag
+```javascript
+// GOOD - Properly signals changes
+postProcessing.outputNode = newNode;
+postProcessing.needsUpdate = true;
+```
+

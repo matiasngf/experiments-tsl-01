@@ -168,7 +168,7 @@ export function useWaves({
         const dist = length(toMouse);
 
         // Mouse influence radius (in vertical UV units, so it's consistent)
-        const mouseRadius = float(0.06);
+        const mouseRadius = float(0.02);
 
         // === Add noise to the influence ===
         // High frequency noise for surface variation (aspect-corrected)
@@ -191,7 +191,7 @@ export function useWaves({
         const shapeNoise = mx_noise_float(shapeCoord);
 
         // Combine: shape noise modulates the radius, surface noise adds texture
-        const noiseAmount = float(1); // How much noise affects influence
+        const noiseAmount = float(0.3); // How much noise affects influence
         const radiusModulation = shapeNoise.mul(0.3).add(1.0); // 0.7 to 1.3
         const modulatedPhase = dist.div(mouseRadius.mul(radiusModulation)).mul(Math.PI);
         const shapedInfluence = dist.lessThan(mouseRadius.mul(radiusModulation)).select(
@@ -208,7 +208,7 @@ export function useWaves({
 
         // Add displacement when mouse is moving - always push DOWN (negative)
         const mouseStrength = float(0.3);
-        const isMoving = uniforms.mouseVelocity.greaterThan(0.01);
+        const isMoving = uniforms.mouseVelocity.greaterThan(0.001);
         const mouseDisplacement = isMoving.select(
           mouseInfluence.mul(mouseStrength).negate(), // Always push down
           float(0)
@@ -218,7 +218,7 @@ export function useWaves({
         const u_final = u_new.add(mouseDisplacement);
 
         // Store: x = new height (becomes u next frame), y = current height (becomes u_prev), z = noise debug
-        const result = vec4(u_final, u, screenSize.x.greaterThan(500).select(1,0), float(1));
+        const result = vec4(u_final, u, 0, 1);
 
         return result;
       });
@@ -240,10 +240,7 @@ export function useWaves({
   });
 
   return {
-    uniforms: {
-      mouseUv: uniforms.mouseUv,
-      mouseVelocity: uniforms.mouseVelocity,
-    },
+    uniforms,
     render: drawApi.render,
     result: drawFbo,
   };
