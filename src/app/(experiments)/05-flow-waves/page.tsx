@@ -2,7 +2,7 @@
 "use client";
 
 import { useMaterial, useQuadShader, useUniforms } from "@/lib/tsl";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { Suspense, useRef } from "react";
 import { Vector2 } from "three";
 import {
@@ -40,14 +40,14 @@ function Scene() {
   const lastMousePosition = useRef(new Vector2(0, 0));
   const mouseVelocity = useRef(0);
 
-  const { uniforms, render, result } = useWaves({
+  const { uniforms: wavesUniforms, render: renderWaves, result: wavesResult } = useWaves({
     width: 500,
     height: 500,
   });
 
   // Screen display material
   const screenUniforms = useUniforms(() => ({
-    map: uniformTexture(result.texture),
+    map: uniformTexture(wavesResult.texture),
   }));
 
   const screenMaterial = useMaterial(
@@ -87,11 +87,11 @@ function Scene() {
     }
 
     // Update uniforms
-    uniforms.mouseVelocity.value = mouseVelocity.current;
-    uniforms.mouseUv.value.set(pointer.x, -pointer.y);
+    wavesUniforms.mouseVelocity.value = mouseVelocity.current;
+    wavesUniforms.mouseUv.value.set(pointer.x, -pointer.y);
 
     // Run simulation
-    render(delta);
+    renderWaves(delta);
 
     // Update tracking
     lastMousePosition.current.set(pointer.x, pointer.y);
@@ -102,10 +102,10 @@ function Scene() {
     material: screenMaterial,
     renderTarget: null,
     beforeRender: () => {
-      screenUniforms.map.value = result.read.texture;
+      screenUniforms.map.value = wavesResult.read.texture;
     },
     priority: 2,
   });
 
-  return null;
+  return null
 }
