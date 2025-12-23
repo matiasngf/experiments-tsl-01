@@ -11,14 +11,14 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Suspense, useRef } from "react";
 import { HalfFloatType, NoColorSpace, Vector2 } from "three";
 import {
-  clamp,
+  cos,
   float,
   Fn,
   length,
-  mix,
+  mx_noise_float,
   screenSize,
-  smoothstep,
   texture,
+  time,
   uniform,
   uniformTexture,
   uv,
@@ -46,8 +46,12 @@ export default function FlowWavesPage() {
   );
 }
 
-const RENDERS_PER_FRAME = 2;
-const PI = Math.PI;
+// Wave equation parameters
+// α² = (c * dt / dx)² - Courant number squared
+// For stability in 2D: α² ≤ 0.5
+// Higher = faster waves, lower = slower waves
+const ALPHA_SQ = 0.5;
+const DAMPING = 0.99; // Energy loss per frame (1.0 = no damping)
 
 function Scene() {
   const { size } = useThree();
@@ -57,14 +61,12 @@ function Scene() {
   });
   const lastMousePosition = useRef(new Vector2(0, 0));
   const mouseVelocity = useRef(0);
-  const mouseDirection = useRef(new Vector2(0, 0));
   const frameCount = useRef(0);
 
   const uniforms = useUniforms(() => ({
     feedbackMap: uniformTexture(drawFbo.read.texture),
     mouseUv: uniform(vec2(0)),
     mouseVelocity: uniform(0),
-    mouseDirection: uniform(vec2(0, 1)),
     frame: uniform(0),
     resolution: uniform(vec2(size.width, size.height)),
   }));
@@ -72,121 +74,140 @@ function Scene() {
   // Update resolution when size changes
   uniforms.resolution.value.set(size.width, size.height);
 
-  // Use NodeMaterial instead of MeshBasicNodeMaterial to avoid tonemapping/clamping
   const drawMaterial = useMaterial(
     NodeMaterial,
     (mat) => {
       const colorFn = Fn(() => {
-        const frame = uniforms.frame;
         const resolution = uniforms.resolution;
+        const alphaSq = float(ALPHA_SQ);
+        const damping = float(DAMPING);
 
-        // Texel size
-        const e = vec3(vec2(1.0).div(resolution), float(0));
+        // Texel size for sampling neighbors
+        const texelSize = vec2(1.0).div(resolution);
         const q = uv();
+        const sampleUv = q.flipY();
 
-        // Sample current and neighbors from feedback texture (flipY for correct orientation)
-        const c = texture(uniforms.feedbackMap, q.flipY());
+        // Sample current pixel
+        // x = u(t) - current height
+        // y = u(t-1) - previous height
+        const current = texture(uniforms.feedbackMap, sampleUv);
+        const u = current.x;
+        const u_prev = current.y;
 
-        const p11 = c.y; // Previous height stored in y channel
+        // Sample 4 neighbors (current height = x channel)
+        const u_north = texture(
+          uniforms.feedbackMap,
+          sampleUv.add(vec2(0, texelSize.y))
+        ).x;
+        const u_south = texture(
+          uniforms.feedbackMap,
+          sampleUv.sub(vec2(0, texelSize.y))
+        ).x;
+        const u_east = texture(
+          uniforms.feedbackMap,
+          sampleUv.add(vec2(texelSize.x, 0))
+        ).x;
+        const u_west = texture(
+          uniforms.feedbackMap,
+          sampleUv.sub(vec2(texelSize.x, 0))
+        ).x;
 
-        // Sample neighbors
-        const p10 = texture(uniforms.feedbackMap, q.flipY().sub(e.zy)).x;
-        const p01 = texture(uniforms.feedbackMap, q.flipY().sub(e.xz)).x;
-        const p21 = texture(uniforms.feedbackMap, q.flipY().add(e.xz)).x;
-        const p12 = texture(uniforms.feedbackMap, q.flipY().add(e.zy)).x;
+        // Boundary: reflect at edges (Neumann boundary conditions)
+        const atLeft = sampleUv.x.lessThan(texelSize.x);
+        const atRight = sampleUv.x.greaterThan(float(1).sub(texelSize.x));
+        const atBottom = sampleUv.y.lessThan(texelSize.y);
+        const atTop = sampleUv.y.greaterThan(float(1).sub(texelSize.y));
 
-        // Wave propagation equation
-        // d = -(p11 - 0.5) * 2.0 + (p10 + p01 + p21 + p12 - 2.0)
-        const waveBase = p11
-          .sub(0.5)
-          .mul(-2.0)
-          .add(p10.add(p01).add(p21).add(p12).sub(2.0));
+        const west = atLeft.select(u_east, u_west);
+        const east = atRight.select(u_west, u_east);
+        const south = atBottom.select(u_north, u_south);
+        const north = atTop.select(u_south, u_north);
 
-        // === Mouse Wave Calculation ===
+        // Discrete Laplacian: ∇²u ≈ (u_n + u_s + u_e + u_w - 4*u)
+        const laplacian = north.add(south).add(east).add(west).sub(u.mul(4));
+
+        // Wave equation: u(t+1) = 2*u(t) - u(t-1) + α² * ∇²u
+        // With damping: u(t+1) = damping * (2*u(t) - u(t-1) + α² * ∇²u)
+        const u_new = damping.mul(
+          u.mul(2).sub(u_prev).add(alphaSq.mul(laplacian))
+        );
+
+        // === Mouse interaction ===
+        // Convert mouse NDC (-1,1) to UV (0,1)
         const mousePos = uniforms.mouseUv;
-        const mouseDir = uniforms.mouseDirection;
-        const mouseInfluence = smoothstep(
-          float(0.01),
-          float(1.7),
-          uniforms.mouseVelocity
-        );
-        const clampedMouseInfluence = clamp(mouseInfluence, float(0.1), float(1.0));
-
-        const mouseRadius = mix(float(0.02), float(0.1), clampedMouseInfluence);
-        const invertedRadius = float(1.0).div(mouseRadius);
-
-        // Adjust UV for aspect ratio
-        const aspectFix = screenSize.x.div(screenSize.y);
-        const adjustedUv = vec2(q.x.mul(aspectFix), q.y);
-        const adjustedMousePos = vec2(
-          mousePos.x.add(1).mul(0.5).mul(aspectFix),
-          mousePos.y.negate().add(1).mul(0.5)
+        const mouseUvPos = vec2(
+          mousePos.x.add(1).mul(0.5),
+          mousePos.y.add(1).mul(0.5)
         );
 
-        // Distance to mouse (chained operations)
-        const mouseDistRaw = length(adjustedUv.sub(adjustedMousePos))
-          .div(mouseRadius)
-          .clamp(0, 1);
-        const mouseDist = float(1).sub(mouseDistRaw);
+        // Distance from current pixel to mouse
+        const toMouse = q.sub(mouseUvPos);
+        const dist = length(toMouse);
 
-        const stepMouse = smoothstep(float(0), float(0.6), mouseDist);
+        // Mouse influence radius
+        const mouseRadius = float(0.06);
 
-        // Directional distance for wave shape (negate X to match screen space)
-        const adjustedMouseDir = vec2(mouseDir.x.negate().mul(aspectFix), mouseDir.y);
-        const dirMouseDistRaw = adjustedMouseDir
-          .dot(adjustedUv.sub(adjustedMousePos))
-          .mul(invertedRadius)
-          .mul(PI)
-          .clamp(-PI, PI);
-        const dirMouseDist = dirMouseDistRaw.sin();
+        // === Add noise to the influence ===
+        // High frequency noise for surface variation
+        const noiseScale = float(40.0);
+        const noiseSpeed = float(1.0);
+        const noiseCoord = vec3(
+          q.x.mul(noiseScale),
+          q.y.mul(noiseScale),
+          time.mul(noiseSpeed)
+        );
+        const surfaceNoise = mx_noise_float(noiseCoord);
 
-        const mouseWave = dirMouseDist.mul(stepMouse);
+        // Low frequency noise for organic shape distortion
+        const shapeNoiseScale = float(8.0);
+        const shapeCoord = vec3(
+          q.x.mul(shapeNoiseScale),
+          q.y.mul(shapeNoiseScale),
+          time.mul(1.5)
+        );
+        const shapeNoise = mx_noise_float(shapeCoord);
 
-        // Mouse mixer
-        const mouseMixer = clamp(
-          uniforms.mouseVelocity.mul(2.0),
-          float(0),
-          float(1)
-        ).mul(mix(stepMouse, mouseDist, float(0.5)));
-
-        // Add mouse wave (only negative waves for pushing down)
-        const mouseContribution = mouseWave.mul(0.1).mul(mouseMixer);
-        const waveWithMouse = waveBase.add(
-          mouseWave.lessThan(0).select(mouseContribution, float(0))
+        // Combine: shape noise modulates the radius, surface noise adds texture
+        const noiseAmount = float(1); // How much noise affects influence
+        const radiusModulation = shapeNoise.mul(0.3).add(1.0); // 0.7 to 1.3
+        const modulatedPhase = dist.div(mouseRadius.mul(radiusModulation)).mul(Math.PI);
+        const shapedInfluence = dist.lessThan(mouseRadius.mul(radiusModulation)).select(
+          cos(modulatedPhase).add(1).mul(0.5),
+          float(0)
         );
 
-        // Damping
-        const waveDamped = waveWithMouse.mul(0.99);
+        // Add surface texture noise within the influence area
+        // Remap noise from [-1, 1] to [0, 1] so it only scales intensity, never reverses direction
+        const noiseRemapped = surfaceNoise.add(1).mul(0.5); // Now 0 to 1
+        // Mix between full intensity (1.0) and noise-scaled based on noiseAmount
+        const textureVariation = noiseRemapped.mul(noiseAmount).add(float(1).sub(noiseAmount));
+        const mouseInfluence = shapedInfluence.mul(textureVariation);
 
-        // Edge damping (chained)
-        const flowEdge = 0.1;
-        const edgeX1 = smoothstep(float(0), float(flowEdge), q.x);
-        const edgeX2 = smoothstep(float(1), float(1.0 - flowEdge), q.x);
-        const edgeY1 = smoothstep(float(1), float(1.0 - flowEdge), q.y);
-        const edgeY2 = smoothstep(float(0), float(flowEdge), q.y);
-        const edge = float(1).sub(edgeX1.mul(edgeX2).mul(edgeY1).mul(edgeY2));
-        const waveEdgeDamped = mix(waveDamped, float(0), edge);
+        // Add displacement when mouse is moving - always push DOWN (negative)
+        const mouseStrength = float(0.3);
+        const isMoving = uniforms.mouseVelocity.greaterThan(0.01);
+        const mouseDisplacement = isMoving.select(
+          mouseInfluence.mul(mouseStrength).negate(), // Always push down
+          float(0)
+        );
 
-        // Clamp minimum to avoid too much noise
-        const waveClamped = waveEdgeDamped
+        // Apply mouse to current height
+        const u_final = u_new.add(mouseDisplacement);
 
-        // Remap from -1..1 to 0..1
-        const waveRemapped = waveClamped.mul(0.5).add(0.5);
+        // Store: x = new height (becomes u next frame), y = current height (becomes u_prev), z = noise debug
+        const result = vec4(u_final, u, surfaceNoise, float(1));
 
-        // Store current value in x, previous in y (for wave propagation)
-        const result = vec4(waveRemapped, c.x, float(0), float(1));
-
-        // Initialize to neutral on first frames
-        const initColor = vec4(0.5, 0.5, 0, 1);
-        return frame.lessThan(3).select(initColor, result);
+        return result
       });
 
-      mat.colorNode = colorFn();
+      mat.outputNode = colorFn()
+
+      mat.toneMapped = false
     },
     [uniforms]
   );
 
-  // Screen display material with coloring
+  // Screen display material
   const screenUniforms = useUniforms(() => ({
     map: uniformTexture(drawFbo.texture),
   }));
@@ -196,26 +217,18 @@ function Scene() {
     (mat) => {
       const colorFn = Fn(() => {
         const sample = texture(screenUniforms.map, uv());
+        const height = sample.x;
+        const noiseDebug = sample.z; // Noise stored in z channel
 
-        // Height is stored in x channel, centered around 0.5
-        const height = sample.x.sub(0.5).mul(2.0); // -1 to 1 range
+        // Visualize: Red = positive (peak), Green = negative (trough), Blue = noise
+        const scale = float(5.0);
+        const positive = height.max(0).mul(scale);
+        const negative = height.negate().max(0).mul(scale);
 
-        // Debug colors: red if above, green if below, black otherwise
-        const red = vec3(1, 0, 0);
-        const green = vec3(0, 1, 0);
-        const black = vec3(0, 0, 0);
+        // Noise visualization: map from [-1, 1] to [0, 1]
+        const noiseVis = noiseDebug.add(1).mul(0.5);
 
-        // Above surface (positive height) = red
-        // Below surface (negative height) = green
-        const aboveSurface = height.greaterThan(0.01);
-        const belowSurface = height.lessThan(-0.01);
-
-        const col = aboveSurface.select(
-          red,
-          belowSurface.select(green, black)
-        );
-
-        return vec4(col, float(1));
+        return vec4(vec3(positive, negative, 0), float(1));
       });
 
       mat.colorNode = colorFn();
@@ -226,7 +239,7 @@ function Scene() {
   const drawApi = useQuadShader({
     material: drawMaterial,
     renderTarget: drawFbo,
-    autoRender: true,
+    autoRender: false,
     autoSwap: true,
     beforeRender: () => {
       uniforms.feedbackMap.value = drawFbo.read.texture;
@@ -234,45 +247,31 @@ function Scene() {
   });
 
   useFrame((state, delta) => {
-    const currentMousePosition = state.pointer;
+    const pointer = state.pointer;
     const lastPos = lastMousePosition.current;
 
-    // Calculate velocity (distance moved this frame)
-    const dx = currentMousePosition.x - lastPos.x;
-    const dy = currentMousePosition.y - lastPos.y;
-    const velocity = Math.sqrt(dx * dx + dy * dy) / delta;
+    // Calculate velocity
+    const dx = pointer.x - lastPos.x;
+    const dy = pointer.y - lastPos.y;
+    const speed = Math.sqrt(dx * dx + dy * dy);
 
-    // Smooth velocity
-    mouseVelocity.current = mouseVelocity.current * 0.9 + velocity * 0.1;
-
-    // Update direction (normalized)
-    if (velocity > 0.001) {
-      const len = Math.sqrt(dx * dx + dy * dy);
-      if (len > 0) {
-        mouseDirection.current.set(dx / len, dy / len);
-      }
+    // Smooth velocity with fast attack, slow decay
+    if (speed > mouseVelocity.current) {
+      mouseVelocity.current = speed;
+    } else {
+      mouseVelocity.current *= 0.95;
     }
 
     // Update uniforms
     uniforms.mouseVelocity.value = mouseVelocity.current;
-    uniforms.mouseDirection.value.set(
-      mouseDirection.current.x,
-      mouseDirection.current.y
-    );
     uniforms.frame.value = frameCount.current;
+    uniforms.mouseUv.value.set(pointer.x, -pointer.y);
 
-    // Render multiple times per frame for smooth mouse trails
-    for (let i = 0; i < RENDERS_PER_FRAME; i++) {
-      const t = (i + 1) / RENDERS_PER_FRAME;
-      const interpolatedX = lastPos.x + (currentMousePosition.x - lastPos.x) * t;
-      const interpolatedY = lastPos.y + (currentMousePosition.y - lastPos.y) * t;
+    // Run simulation
+    drawApi.render(delta);
 
-      uniforms.mouseUv.value.set(interpolatedX, interpolatedY);
-      drawApi.render(delta);
-    }
-
-    // Update last mouse position
-    lastMousePosition.current.set(currentMousePosition.x, currentMousePosition.y);
+    // Update tracking
+    lastMousePosition.current.set(pointer.x, pointer.y);
     frameCount.current++;
   }, 1);
 
