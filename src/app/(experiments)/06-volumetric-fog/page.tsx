@@ -2,17 +2,18 @@
 "use client";
 
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
-import { Canvas } from "@react-three/fiber";
-import { Suspense, useEffect } from "react";
+import { Canvas, useFrame } from "@react-three/fiber";
+import { Suspense, useEffect, useRef } from "react";
 import { renderOutput } from "three/tsl";
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { useBloomPass } from "@/lib/gpu/use-bloom-pass";
 import { City } from "./city";
 import { LightningSystem } from "./lightning";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 
 export default function VolumetricFogPage() {
   return (
-    <div className="w-screen h-screen bg-zinc-950">
+    <div className="w-screen h-screen bg-zinc-950 relative">
       <Canvas
         gl={async (props) => {
           const { WebGPURenderer } = await import("three/webgpu");
@@ -25,11 +26,55 @@ export default function VolumetricFogPage() {
           <Scene />
         </Suspense>
       </Canvas>
+      <CopyButton />
     </div>
   );
 }
 
+function CopyButton() {
+  const handleCopy = () => {
+    const data = (window as unknown as { __cameraDebugData: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } }).__cameraDebugData;
+    if (!data) {
+      console.log("No camera data available yet");
+      return;
+    }
+
+    const { position: pos, target } = data;
+    const output = `Camera Position: [${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}]
+Target: [${target.x.toFixed(2)}, ${target.y.toFixed(2)}, ${target.z.toFixed(2)}]`;
+
+    navigator.clipboard.writeText(output);
+    console.log(output);
+    console.log("\n✓ Copied to clipboard!");
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="absolute top-4 right-4 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-md text-sm font-medium transition-colors"
+    >
+      Copy to Console
+    </button>
+  );
+}
+
 function Scene() {
+  const controlsRef = useRef<OrbitControlsImpl>(null);
+
+  // Update camera position on every frame
+  useFrame(({ camera }) => {
+    if (controlsRef.current) {
+      const pos = camera.position;
+      const target = controlsRef.current.target;
+      
+      // Update global reference object for the button to access
+      (window as unknown as { __cameraDebugData: { position: { x: number; y: number; z: number }; target: { x: number; y: number; z: number } } }).__cameraDebugData = {
+        position: { x: pos.x, y: pos.y, z: pos.z },
+        target: { x: target.x, y: target.y, z: target.z },
+      };
+    }
+  });
+
   // Setup postprocessing with bloom
   const { postProcessing, scenePass } = usePostProcessing({ enabled: true });
   const { bloomNode } = useBloomPass(scenePass, {
@@ -47,12 +92,13 @@ function Scene() {
   return (
     <>
       {/* Camera and Controls */}
-      <PerspectiveCamera makeDefault position={[25, 15, 25]} fov={50} />
+      <PerspectiveCamera makeDefault position={[6.2, 0.7, 7.7]} fov={40} />
       <OrbitControls
-        target={[0, 2, 0]}
+        ref={controlsRef}
+        target={[-2.8, 2.0, 3.6]}
         enableDamping
         dampingFactor={0.05}
-        minDistance={10}
+        minDistance={2}
         maxDistance={100}
       />
 
@@ -81,10 +127,10 @@ function Scene() {
       {/* Lightning System */}
       <LightningSystem count={10} />
 
-      {/* Ground plane for reference */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]}>
-        <planeGeometry args={[100, 100]} />
-        <meshStandardMaterial color="#0a0a0f" roughness={0.9} />
+      {/* Black floor */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
+        <planeGeometry args={[200, 200]} />
+        <meshStandardMaterial color="#000000" roughness={1} />
       </mesh>
     </>
   );
