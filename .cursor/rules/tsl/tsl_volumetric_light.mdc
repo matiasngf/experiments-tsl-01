@@ -1,0 +1,656 @@
+# Three.js TSL Volumetric Lighting
+
+## Overview
+
+`VolumeNodeMaterial` is a specialized material for creating volumetric lighting effects (fog, smoke, god rays) that respond to scene lights. It uses ray marching and the `VolumetricLightingModel` to calculate light scattering through a volumetric medium.
+
+**Key Features:**
+- Automatic integration with scene lights (PointLight, SpotLight, RectAreaLight)
+- Shadow support for realistic light occlusion
+- Ray marching with configurable steps
+- Depth-aware rendering (doesn't render behind solid objects)
+- Beer's Law for light absorption and scattering
+
+## Basic Setup
+
+### 1. Create Volumetric Material
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { uniform, screenCoordinate, Fn } from 'three/tsl';
+import { bayer16 } from 'three/addons/tsl/math/Bayer.js';
+
+const volumetricMaterial = new THREE.VolumeNodeMaterial();
+volumetricMaterial.steps = 12; // Number of ray marching steps (2-25)
+volumetricMaterial.offsetNode = bayer16(screenCoordinate); // Dithering to reduce banding
+
+// Define scattering density
+volumetricMaterial.scatteringNode = Fn(({ positionRay }) => {
+    // Return density at position (0-1+ range)
+    return uniform(1.0);
+});
+```
+
+**Reference:** Based on `examples/webgpu_volume_lighting.html` lines 129-146
+
+### 2. Create Volumetric Mesh
+
+The geometry defines the boundaries of the volumetric effect:
+
+```javascript
+const LAYER_VOLUMETRIC_LIGHTING = 10; // Custom layer for separation
+
+const volumetricMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(20, 10, 20), // Volume boundaries
+    volumetricMaterial
+);
+volumetricMesh.receiveShadow = true; // Important for shadow integration
+volumetricMesh.position.y = 2;
+
+// Enable only the volumetric layer
+volumetricMesh.layers.disableAll();
+volumetricMesh.layers.enable(LAYER_VOLUMETRIC_LIGHTING);
+
+scene.add(volumetricMesh);
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 148-153
+
+### 3. Add Lights with Volumetric Layer
+
+**Critical:** Lights must have the volumetric layer enabled to illuminate the volume.
+
+```javascript
+// Point Light
+const pointLight = new THREE.PointLight(0xf9bb50, 3, 100);
+pointLight.castShadow = true;
+pointLight.position.set(0, 1.4, 0);
+pointLight.layers.enable(LAYER_VOLUMETRIC_LIGHTING); // Enable volumetric layer
+scene.add(pointLight);
+
+// Spot Light
+const spotLight = new THREE.SpotLight(0xffffff, 100);
+spotLight.position.set(2.5, 5, 2.5);
+spotLight.angle = Math.PI / 6;
+spotLight.penumbra = 1;
+spotLight.decay = 2;
+spotLight.distance = 0;
+spotLight.castShadow = true;
+spotLight.shadow.intensity = 0.98;
+spotLight.shadow.mapSize.width = 1024;
+spotLight.shadow.mapSize.height = 1024;
+spotLight.shadow.camera.near = 1;
+spotLight.shadow.camera.far = 15;
+spotLight.shadow.focus = 1;
+spotLight.shadow.bias = -0.003;
+spotLight.layers.enable(LAYER_VOLUMETRIC_LIGHTING); // Enable volumetric layer
+scene.add(spotLight);
+
+// Rect Area Light (requires RectAreaLightTexturesLib)
+import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
+THREE.RectAreaLightNode.setLTC(RectAreaLightTexturesLib.init());
+
+const rectLight = new THREE.RectAreaLight(0xff0000, 5, 4, 10);
+rectLight.position.set(-5, 6, 5);
+rectLight.layers.enable(LAYER_VOLUMETRIC_LIGHTING); // Enable volumetric layer
+scene.add(rectLight);
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 169-193 and `examples/webgpu_volume_lighting_rectarea.html` lines 159-172
+
+### 4. Setup Post-Processing Pipeline
+
+Volumetric effects require a multi-pass rendering setup:
+
+```javascript
+import { pass, screenUV } from 'three/tsl';
+import { gaussianBlur } from 'three/addons/tsl/display/GaussianBlurNode.js';
+
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// Create volumetric layer
+const volumetricLayer = new THREE.Layers();
+volumetricLayer.disableAll();
+volumetricLayer.enable(LAYER_VOLUMETRIC_LIGHTING);
+
+// Scene Pass - render main scene
+const scenePass = pass(scene, camera);
+const sceneDepth = scenePass.getTextureNode('depth');
+
+// Connect scene depth for occlusion
+volumetricMaterial.depthNode = sceneDepth.sample(screenUV);
+
+// Volumetric Pass - render only volumetric layer
+const volumetricPass = pass(scene, camera, { depthBuffer: false });
+volumetricPass.name = 'Volumetric Lighting';
+volumetricPass.setLayers(volumetricLayer);
+volumetricPass.setResolutionScale(0.25); // Lower resolution for performance
+
+// Optional: Denoise with Gaussian blur
+const denoiseStrength = uniform(0.6);
+const blurredVolumetricPass = gaussianBlur(volumetricPass, denoiseStrength);
+
+// Combine scene with volumetric effect
+const volumetricLightingIntensity = uniform(1);
+const scenePassColor = scenePass.add(blurredVolumetricPass.mul(volumetricLightingIntensity));
+
+postProcessing.outputNode = scenePassColor;
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 197-231
+
+### 5. Render Loop
+
+```javascript
+function animate() {
+    postProcessing.render();
+}
+
+renderer.setAnimationLoop(animate);
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 294-296
+
+## Advanced Scattering with 3D Noise
+
+For realistic fog/smoke effects, use a 3D noise texture:
+
+### Creating 3D Noise Texture
+
+```javascript
+import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
+
+function createTexture3D() {
+    let i = 0;
+    const size = 128;
+    const data = new Uint8Array(size * size * size);
+    const scale = 10;
+    const perlin = new ImprovedNoise();
+    const repeatFactor = 5.0;
+
+    for (let z = 0; z < size; z++) {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const nx = (x / size) * repeatFactor;
+                const ny = (y / size) * repeatFactor;
+                const nz = (z / size) * repeatFactor;
+                const noiseValue = perlin.noise(nx * scale, ny * scale, nz * scale);
+                data[i] = (128 + 128 * noiseValue);
+                i++;
+            }
+        }
+    }
+
+    const texture = new THREE.Data3DTexture(data, size, size, size);
+    texture.format = THREE.RedFormat;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.unpackAlignment = 1;
+    texture.needsUpdate = true;
+
+    return texture;
+}
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 53-98
+
+### Using 3D Noise in Scattering
+
+```javascript
+import { vec3, time, texture3D } from 'three/tsl';
+
+const noiseTexture3D = createTexture3D();
+const smokeAmount = uniform(2);
+
+volumetricMaterial.scatteringNode = Fn(({ positionRay }) => {
+    // Animate noise over time
+    const timeScaled = vec3(time, 0, time.mul(0.3));
+
+    // Helper function for multi-octave noise
+    const sampleGrain = (scale, timeScale = 1) => 
+        texture3D(
+            noiseTexture3D, 
+            positionRay.add(timeScaled.mul(timeScale)).mul(scale).mod(1), 
+            0
+        ).r.add(0.5);
+
+    // Combine multiple noise octaves for detail
+    let density = sampleGrain(0.1);
+    density = density.mul(sampleGrain(0.05, 1));
+    density = density.mul(sampleGrain(0.02, 2));
+
+    // Mix with base density
+    return smokeAmount.mix(1, density);
+});
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 132-146
+
+## VolumetricLightingModel Implementation
+
+The `VolumetricLightingModel` extends `LightingModel` and implements volumetric light scattering.
+
+### Key Methods
+
+**`start(builder)`** - Main ray marching loop
+- Determines ray direction (camera to object or vice versa based on distance)
+- Steps through the volume
+- Accumulates light scattering at each step
+- Applies Beer's Law for light absorption
+
+**Reference:** `src/nodes/functions/VolumetricLightingModel.js` lines 31-123
+
+**`direct(lightData, builder)`** - Handles point and spot lights
+- Ignores lights with infinite distance (directional lights)
+- Applies shadow maps to light contribution
+- Accumulates light color at current ray position
+
+**Reference:** `src/nodes/functions/VolumetricLightingModel.js` lines 145-158
+
+```javascript
+direct({ lightNode, lightColor }, builder) {
+    // Ignore lights with infinite distance
+    if (lightNode.light.distance === undefined) return;
+
+    const directLight = lightColor.xyz.toVar();
+    directLight.mulAssign(lightNode.shadowNode); // Apply shadows
+
+    this.scatteringLight(directLight, builder);
+}
+```
+
+**`directRectArea(lightData, builder)`** - Handles rect area lights
+- Uses LTC (Linearly Transformed Cosines) for area light evaluation
+- Calculates light contribution from rectangular area
+
+**Reference:** `src/nodes/functions/VolumetricLightingModel.js` lines 160-173
+
+**`scatteringLight(lightColor, builder)`** - Accumulates light with depth testing
+- Checks if ray position is in front of scene geometry
+- Only adds light if not occluded by solid objects
+
+**Reference:** `src/nodes/functions/VolumetricLightingModel.js` lines 125-143
+
+```javascript
+scatteringLight(lightColor, builder) {
+    const sceneDepthNode = builder.context.sceneDepthNode;
+
+    if (sceneDepthNode) {
+        // Only add light if ray is in front of scene geometry
+        If(sceneDepthNode.greaterThanEqual(linearDepthRay), () => {
+            scatteringDensity.addAssign(lightColor);
+        });
+    } else {
+        scatteringDensity.addAssign(lightColor);
+    }
+}
+```
+
+### Ray Marching Process
+
+1. **Determine ray direction** (lines 31-51):
+   - If camera far from object: ray from camera to surface
+   - If camera near/inside: ray from surface to camera
+
+2. **Calculate step size** (lines 55-58):
+   ```javascript
+   const steps = uniform('int').onRenderUpdate(({ material }) => material.steps);
+   const stepSize = viewVector.length().div(steps).toVar();
+   ```
+
+3. **Apply offset for dithering** (lines 65-71):
+   ```javascript
+   if (material.offsetNode) {
+       // Reduce banding by offsetting ray start
+       distTravelled.addAssign(material.offsetNode.mul(stepSize));
+   }
+   ```
+
+4. **Loop through ray** (lines 73-119):
+   - Calculate position along ray
+   - Update context with current position
+   - Call light evaluation (triggers `direct()` and `directRectArea()`)
+   - Apply custom scattering function
+   - Calculate transmittance using Beer's Law
+   - Advance along ray
+
+5. **Output result** (lines 175-178):
+   ```javascript
+   finish(builder) {
+       builder.context.outgoingLight.assign(outgoingRayLight);
+   }
+   ```
+
+## VolumeNodeMaterial Properties
+
+```javascript
+class VolumeNodeMaterial extends NodeMaterial {
+    steps = 25;              // Number of ray marching steps
+    offsetNode = null;       // Node for ray offset (dithering)
+    scatteringNode = null;   // Function for density calculation
+    depthNode = null;        // Scene depth for occlusion
+    lights = true;           // Enable lighting
+    transparent = true;      // Required for blending
+    side = BackSide;         // Render back faces
+    depthTest = false;       // Don't test against depth buffer
+    depthWrite = false;      // Don't write to depth buffer
+}
+```
+
+**Reference:** `src/materials/nodes/VolumeNodeMaterial.js` lines 1-82
+
+### setupLightingModel()
+
+```javascript
+setupLightingModel() {
+    return new VolumetricLightingModel();
+}
+```
+
+**Reference:** `src/materials/nodes/VolumeNodeMaterial.js` lines 73-77
+
+## Supported Light Types
+
+| Light Type | Supported | Notes |
+|------------|-----------|-------|
+| PointLight | ✅ | Requires `distance` property set |
+| SpotLight | ✅ | Full shadow support |
+| RectAreaLight | ✅ | Requires RectAreaLightTexturesLib.init() |
+| DirectionalLight | ❌ | Infinite distance lights are ignored |
+| HemisphereLight | ❌ | Not supported |
+| AmbientLight | ❌ | Not supported |
+
+**Important:** From `src/nodes/functions/VolumetricLightingModel.js` lines 147-149:
+```javascript
+// Ignore lights with infinite distance
+if (lightNode.light.distance === undefined) return;
+```
+
+## Performance Optimization
+
+### 1. Resolution Scaling
+
+Render volumetric pass at lower resolution:
+
+```javascript
+volumetricPass.setResolutionScale(0.25); // 25% of screen resolution
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` line 221
+
+### 2. Step Count
+
+Balance quality vs performance:
+- **Low quality:** 4-8 steps
+- **Medium quality:** 8-12 steps (recommended)
+- **High quality:** 12-25 steps
+
+```javascript
+volumetricMaterial.steps = 12;
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` line 130
+
+### 3. Dithering
+
+Use dithering to hide banding artifacts with fewer steps:
+
+```javascript
+import { bayer16 } from 'three/addons/tsl/math/Bayer.js';
+
+volumetricMaterial.offsetNode = bayer16(screenCoordinate);
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` line 131
+
+### 4. Denoising
+
+Apply Gaussian blur to smooth results:
+
+```javascript
+import { gaussianBlur } from 'three/addons/tsl/display/GaussianBlurNode.js';
+
+const denoiseStrength = uniform(0.6);
+const blurredVolumetricPass = gaussianBlur(volumetricPass, denoiseStrength);
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 225-227
+
+### 5. Layer Separation
+
+Use layers to avoid rendering objects twice:
+
+```javascript
+// Volumetric objects only on volumetric layer
+volumetricMesh.layers.disableAll();
+volumetricMesh.layers.enable(LAYER_VOLUMETRIC_LIGHTING);
+
+// Regular objects on default layer only (layer 0)
+regularMesh.layers.disableAll();
+regularMesh.layers.enable(0);
+```
+
+**Reference:** `examples/webgpu_volume_lighting.html` lines 151-153
+
+## Complete Example: Animated Volumetric Fog
+
+```javascript
+import * as THREE from 'three/webgpu';
+import { vec3, Fn, time, texture3D, screenUV, uniform, screenCoordinate, pass } from 'three/tsl';
+import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
+import { bayer16 } from 'three/addons/tsl/math/Bayer.js';
+import { gaussianBlur } from 'three/addons/tsl/display/GaussianBlurNode.js';
+
+const LAYER_VOLUMETRIC_LIGHTING = 10;
+
+// Renderer setup
+const renderer = new THREE.WebGPURenderer();
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setAnimationLoop(animate);
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 2;
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(-8, 1, -6);
+
+// Create 3D noise texture (see createTexture3D function above)
+const noiseTexture3D = createTexture3D();
+const smokeAmount = uniform(2);
+
+// Volumetric material
+const volumetricMaterial = new THREE.VolumeNodeMaterial();
+volumetricMaterial.steps = 12;
+volumetricMaterial.offsetNode = bayer16(screenCoordinate);
+volumetricMaterial.scatteringNode = Fn(({ positionRay }) => {
+    const timeScaled = vec3(time, 0, time.mul(0.3));
+    const sampleGrain = (scale, timeScale = 1) => 
+        texture3D(noiseTexture3D, positionRay.add(timeScaled.mul(timeScale)).mul(scale).mod(1), 0).r.add(0.5);
+    
+    let density = sampleGrain(0.1);
+    density = density.mul(sampleGrain(0.05, 1));
+    density = density.mul(sampleGrain(0.02, 2));
+    
+    return smokeAmount.mix(1, density);
+});
+
+// Volumetric mesh
+const volumetricMesh = new THREE.Mesh(new THREE.BoxGeometry(20, 10, 20), volumetricMaterial);
+volumetricMesh.receiveShadow = true;
+volumetricMesh.position.y = 2;
+volumetricMesh.layers.disableAll();
+volumetricMesh.layers.enable(LAYER_VOLUMETRIC_LIGHTING);
+scene.add(volumetricMesh);
+
+// Lights
+const pointLight = new THREE.PointLight(0xf9bb50, 3, 100);
+pointLight.castShadow = true;
+pointLight.position.set(0, 1.4, 0);
+pointLight.layers.enable(LAYER_VOLUMETRIC_LIGHTING);
+scene.add(pointLight);
+
+const spotLight = new THREE.SpotLight(0xffffff, 100);
+spotLight.position.set(2.5, 5, 2.5);
+spotLight.angle = Math.PI / 6;
+spotLight.penumbra = 1;
+spotLight.decay = 2;
+spotLight.castShadow = true;
+spotLight.shadow.mapSize.width = 1024;
+spotLight.shadow.mapSize.height = 1024;
+spotLight.layers.enable(LAYER_VOLUMETRIC_LIGHTING);
+scene.add(spotLight);
+
+// Post-processing
+const postProcessing = new THREE.PostProcessing(renderer);
+
+const volumetricLayer = new THREE.Layers();
+volumetricLayer.disableAll();
+volumetricLayer.enable(LAYER_VOLUMETRIC_LIGHTING);
+
+const scenePass = pass(scene, camera);
+const sceneDepth = scenePass.getTextureNode('depth');
+volumetricMaterial.depthNode = sceneDepth.sample(screenUV);
+
+const volumetricPass = pass(scene, camera, { depthBuffer: false });
+volumetricPass.setLayers(volumetricLayer);
+volumetricPass.setResolutionScale(0.25);
+
+const denoiseStrength = uniform(0.6);
+const blurredVolumetricPass = gaussianBlur(volumetricPass, denoiseStrength);
+
+const volumetricLightingIntensity = uniform(1);
+const scenePassColor = scenePass.add(blurredVolumetricPass.mul(volumetricLightingIntensity));
+postProcessing.outputNode = scenePassColor;
+
+// Animation
+function animate() {
+    const t = performance.now() * 0.001;
+    const scale = 2.4;
+    
+    pointLight.position.x = Math.sin(t * 0.7) * scale;
+    pointLight.position.y = Math.cos(t * 0.5) * scale;
+    pointLight.position.z = Math.cos(t * 0.3) * scale;
+    
+    spotLight.position.x = Math.cos(t * 0.3) * scale;
+    spotLight.lookAt(0, 0, 0);
+    
+    postProcessing.render();
+}
+```
+
+**Reference:** Compiled from `examples/webgpu_volume_lighting.html`
+
+## Common Issues and Solutions
+
+### Issue: Volumetric effect not visible
+
+**Solutions:**
+1. Ensure lights have `layers.enable(LAYER_VOLUMETRIC_LIGHTING)`
+2. Check that `volumetricMaterial.scatteringNode` returns non-zero values
+3. Verify `volumetricLightingIntensity` is > 0
+4. Make sure lights have `distance` property set (not directional lights)
+
+### Issue: Volumetric effect renders behind objects
+
+**Solution:** Connect scene depth to material:
+```javascript
+volumetricMaterial.depthNode = sceneDepth.sample(screenUV);
+```
+
+### Issue: Banding artifacts
+
+**Solutions:**
+1. Add dithering: `volumetricMaterial.offsetNode = bayer16(screenCoordinate)`
+2. Apply Gaussian blur denoising
+3. Increase ray marching steps (but impacts performance)
+
+### Issue: Performance problems
+
+**Solutions:**
+1. Reduce resolution: `volumetricPass.setResolutionScale(0.25)`
+2. Decrease steps: `volumetricMaterial.steps = 8`
+3. Use denoising to compensate for lower quality
+4. Simplify scattering function (avoid complex noise calculations)
+
+### Issue: RectAreaLight not working
+
+**Solution:** Initialize LTC textures before use:
+```javascript
+import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
+THREE.RectAreaLightNode.setLTC(RectAreaLightTexturesLib.init());
+```
+
+**Reference:** `examples/webgpu_volume_lighting_rectarea.html` line 104
+
+## Technical Details
+
+### Beer's Law Implementation
+
+Light absorption through the medium (from `VolumetricLightingModel.js` lines 110-113):
+
+```javascript
+// beer's law
+const falloff = scatteringDensity.mul(0.01).negate().mul(stepSize).exp();
+transmittance.mulAssign(falloff);
+```
+
+This calculates exponential falloff of light as it travels through the medium.
+
+### Depth Occlusion
+
+Prevents volumetric effect from rendering behind solid objects (lines 127-141):
+
+```javascript
+scatteringLight(lightColor, builder) {
+    const sceneDepthNode = builder.context.sceneDepthNode;
+    
+    if (sceneDepthNode) {
+        If(sceneDepthNode.greaterThanEqual(linearDepthRay), () => {
+            scatteringDensity.addAssign(lightColor);
+        });
+    } else {
+        scatteringDensity.addAssign(lightColor);
+    }
+}
+```
+
+### Shadow Integration
+
+Shadows are automatically applied to light contribution (line 154):
+
+```javascript
+directLight.mulAssign(lightNode.shadowNode);
+```
+
+## Best Practices
+
+1. **Always use layers** - Separate volumetric objects from regular scene
+2. **Enable shadows** - Set `receiveShadow = true` and `castShadow = true` on lights
+3. **Provide depth node** - Connect scene depth for proper occlusion
+4. **Use post-processing** - Combine volumetric pass with scene pass
+5. **Apply denoising** - Gaussian blur improves visual quality
+6. **Lower resolution** - Render volumetric pass at 0.25-0.5 scale
+7. **Add dithering** - Use `bayer16()` to reduce banding
+8. **Test step count** - Balance visual quality with performance
+9. **Optimize scattering** - Keep scattering function computationally light
+10. **Set tone mapping** - `NeutralToneMapping` with exposure ~2 works well
+
+## References
+
+- **Examples:**
+  - `examples/webgpu_volume_lighting.html` - Point and spot lights
+  - `examples/webgpu_volume_lighting_rectarea.html` - Rect area lights
+  
+- **Source Code:**
+  - `src/materials/nodes/VolumeNodeMaterial.js` - Material implementation
+  - `src/nodes/functions/VolumetricLightingModel.js` - Lighting model
+  - `src/nodes/core/LightingModel.js` - Base lighting model
+
+- **Related Nodes:**
+  - `three/addons/tsl/math/Bayer.js` - Dithering
+  - `three/addons/tsl/display/GaussianBlurNode.js` - Denoising
