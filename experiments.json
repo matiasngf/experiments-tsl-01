@@ -18,5 +18,9 @@
   {
     "url": "/05-flow-waves",
     "name": "05 Flow Waves"
+  },
+  {
+    "url": "/06-volumetric-fog",
+    "name": "06 Volumetric Fog"
   }
 ]
