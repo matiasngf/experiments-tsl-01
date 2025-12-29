@@ -56,7 +56,7 @@ async function main() {
     const experiments = await getExperiments();
     const outputPath = join(process.cwd(), "experiments.json");
     await writeFile(outputPath, JSON.stringify(experiments, null, 2), "utf-8");
-    console.log(`Generated ${experiments.length} experiments in ${outputPath}`);
+    console.log(`✓ Generated ${experiments.length} experiments in ${outputPath}`);
   } catch (error) {
     console.error("Error generating experiments:", error);
     process.exit(1);

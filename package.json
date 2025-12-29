@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "tsx get-experiments.ts && next dev",
+    "build": "tsx get-experiments.ts && next build",
     "start": "next start",
     "lint": "eslint",
-    "experiments": "npx tsx get-experiments.ts"
+    "experiments": "tsx get-experiments.ts"
   },
   "dependencies": {
     "@radix-ui/react-dropdown-menu": "^2.1.16",
