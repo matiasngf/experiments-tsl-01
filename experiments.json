@@ -20,7 +20,11 @@
     "name": "05 Flow Waves"
   },
   {
-    "url": "/06-volumetric-fog",
-    "name": "06 Volumetric Fog"
+    "url": "/06-simple-raymarching",
+    "name": "06 Simple Raymarching"
+  },
+  {
+    "url": "/07-volumetric-clouds",
+    "name": "07 Volumetric Clouds"
   }
 ]
