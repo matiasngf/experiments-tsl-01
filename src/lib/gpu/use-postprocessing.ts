@@ -54,7 +54,11 @@ export function usePostProcessing(
   // Create scenePass that updates with camera/scene changes
   const scenePass = useMemo(() => {
     return pass(scene, camera);
-  }, [scene, camera]); // Add camera as dependency!
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  scenePass.scene = scene
+  scenePass.camera = camera
 
   // Cleanup on unmount
   useEffect(() => {

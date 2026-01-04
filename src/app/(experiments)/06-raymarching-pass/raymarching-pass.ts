@@ -2,15 +2,11 @@ import { useUniforms } from "@/lib/tsl";
 import { useFrame, useThree } from "@react-three/fiber";
 
 import { useMemo } from "react";
-import { Break, float, Fn, If, length, Loop, normalize, screenUV, time, uniform, vec3, vec4 } from "three/tsl";
+import { Break, float, Fn, If, length, Loop, normalize, screenUV, uniform, vec3, vec4 } from "three/tsl";
 import { Matrix4, TextureNode, Vector3 } from "three/webgpu";
 import { getCameraRayFn } from "./get-camera-ray";
 
-interface RaymarchingOptions {
-  foo?: 'bar'
-}
-
-export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureNode, options: RaymarchingOptions = {}) {
+export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureNode) {
 
   const raymarchingUniforms = useUniforms(() => ({
     boxSize: uniform(1),
@@ -61,9 +57,6 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
       const rayDir = result.get('rayDir')
       const rayOrigin = result.get('rayOrigin')
 
-      // const rayDir = result.rayDir
-      // const rayOrigin = result.rayOrigin
-
       // === RAYMARCHING LOOP ===
       const t = float(0.0).toVar();
   
@@ -106,17 +99,6 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
         });
         
       });
-      
-      // Debug: Uncomment to visualize camera position
-      // return vec4(
-      //   rayOrigin.x.div(10).add(0.5),
-      //   rayOrigin.y.div(10).add(0.5),
-      //   rayOrigin.z.div(10).add(0.5),
-      //   1
-      // );
-      
-      // Debug: Uncomment to visualize ray direction
-      // return vec4(rayDir.mul(0.5).add(0.5), 1);
       
       return color;
     });
