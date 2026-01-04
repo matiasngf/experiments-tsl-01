@@ -8,6 +8,7 @@ import type { PassNode } from "three/webgpu";
 
 interface UsePostProcessingOptions {
   enabled?: boolean;
+  priority?: number
 }
 
 interface UsePostProcessingResult {
@@ -30,40 +31,49 @@ interface UsePostProcessingResult {
  * useEffect(() => {
  *   const sceneColor = scenePass.getTextureNode('output');
  *   postProcessing.outputNode = renderOutput(sceneColor.add(bloomPass));
+ *   postProcessing.needsUpdate = true;
  * }, [postProcessing, scenePass, bloomPass]);
  * ```
  */
 export function usePostProcessing(
   options: UsePostProcessingOptions = {}
 ): UsePostProcessingResult {
-  const { enabled = true } = options;
+  const { enabled = true, priority = 1000 } = options;
 
   const gl = useThree((state) => state.gl) as unknown as WebGPURenderer;
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
 
-  const result = useMemo(() => {
+  const postProcessing = useMemo(() => {
     const postProcessing = new PostProcessing(gl);
-    const scenePass = pass(scene, camera);
 
-    return { postProcessing, scenePass };
-  }, [gl, scene, camera]);
+    return postProcessing
+   
+  }, [gl]);
+
+  // Create scenePass that updates with camera/scene changes
+  const scenePass = useMemo(() => {
+    return pass(scene, camera);
+  }, [scene, camera]); // Add camera as dependency!
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      result.postProcessing.dispose();
+      postProcessing.dispose();
     };
-  }, [result.postProcessing]);
+  }, [postProcessing]);
 
   // Render using postProcessing or normal renderer based on enabled flag
   useFrame(() => {
     if (enabled) {
-      result.postProcessing.render();
+      postProcessing.render();
     } else {
       gl.render(scene, camera);
     }
-  }, 1);
+  }, priority);
 
-  return result;
+  return {
+    postProcessing,
+    scenePass
+  }
 }
