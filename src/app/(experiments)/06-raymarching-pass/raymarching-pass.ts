@@ -2,8 +2,9 @@ import { useUniforms } from "@/lib/tsl";
 import { useFrame, useThree } from "@react-three/fiber";
 
 import { useMemo } from "react";
-import { Break, cameraPosition, cameraProjectionMatrix, cameraProjectionMatrixInverse, cameraViewMatrix, cameraWorldMatrix, float, Fn, getViewPosition, If, length, Loop, normalize, screenUV, time, uniform, vec2, vec3, vec4 } from "three/tsl";
-import { Matrix4, Node, PassNode, TextureNode, Vector3 } from "three/webgpu";
+import { Break, float, Fn, If, length, Loop, normalize, screenUV, time, uniform, vec3, vec4 } from "three/tsl";
+import { Matrix4, TextureNode, Vector3 } from "three/webgpu";
+import { getCameraRayFn } from "./get-camera-ray";
 
 interface RaymarchingOptions {
   foo?: 'bar'
@@ -41,44 +42,26 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
       const uv = screenUV;
       const color = vec4(sceneColor.sample(uv)).toVar();
       const sceneDepthValue = float(sceneDepth.sample(uv).r).toVar();
-  
-      // === RAY ORIGIN ===
-      // Use our manual uniform instead of cameraPosition
-      const rayOrigin = vec3(raymarchingUniforms.cameraPosition).toVar();
-      
-        
-      // === RAY DIRECTION ===
-      // IMPORTANT: For WebGPU, flip Y BEFORE converting to NDC
-      // screenUV goes from (0,0) at bottom-left to (1,1) at top-right
-      // WebGPU NDC has Y going up, so we need to flip it
-      const flippedUV = vec2(uv.x, uv.y.oneMinus()).toVar();
-      
-      // Now convert flipped UV (0 to 1) to NDC (-1 to +1)
-      const ndc = flippedUV.mul(2.0).sub(1.0).toVar();
-      
-      // Create a point in clip space (NDC with depth = 0.5)
-      const clipSpacePoint = vec4(ndc.x, ndc.y, 0.5, 1.0).toVar();
-      
-      // Transform to view space using inverse projection matrix
-      const viewSpacePoint = vec4(
-        raymarchingUniforms.cameraProjectionMatrixInverse.mul(clipSpacePoint)
-      ).toVar();
-      
-      // Perspective divide
-      const viewPoint = viewSpacePoint.xyz.div(viewSpacePoint.w).toVar();
-      
-      // Transform from view space to world space
-      const worldPoint = vec3(
-        raymarchingUniforms.cameraWorldMatrix.mul(vec4(viewPoint, 1.0)).xyz
-      ).toVar();
-      
-      // Ray direction = normalize(worldPoint - rayOrigin)
-      const rayDir = normalize(worldPoint.sub(rayOrigin)).toVar();
+
+      const result = getCameraRayFn(
+        {
+          cameraPosition: raymarchingUniforms.cameraPosition,
+          cameraProjectionMatrixInverse: raymarchingUniforms.cameraProjectionMatrixInverse,
+          cameraWorldMatrix: raymarchingUniforms.cameraWorldMatrix,
+          uv,
+        }
+      )
+
+      const rayDir = result.get('rayDir')
+      const rayOrigin = result.get('rayOrigin')
+
+      // const rayDir = result.rayDir
+      // const rayOrigin = result.rayOrigin
 
       // === RAYMARCHING LOOP ===
       const t = float(0.0).toVar();
   
-      Loop({ start: 0, end: maxSteps, type: 'int' }, ({ i }) => {
+      Loop({ start: 0, end: maxSteps, type: 'int' }, () => {
         
         // Current position along ray (IN WORLD SPACE)
         const pos = rayOrigin.add(rayDir.mul(t)).toVar();
@@ -137,3 +120,4 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
 
    return [raymarchingPassNode, raymarchingUniforms] as const
 }
+
