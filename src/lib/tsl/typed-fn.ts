@@ -16,7 +16,7 @@ export interface TypedShaderNodeFn<Args extends readonly unknown[], Returns = Sh
   once: (subBuilds?: string[] | null) => this;
 }
 
-export function TypedFn<T extends { readonly [key: string]: unknown }, R>(
+export function TypedFn<T extends Record<string, unknown>, R>(
   jsFunc: (args: T, builder: NodeBuilder) => R,
   layout?: string | Record<string, string>,
 ): TypedShaderNodeFn<[ProxiedObject<T>], R> {

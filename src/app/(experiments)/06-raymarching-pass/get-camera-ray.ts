@@ -3,7 +3,7 @@ import { Node } from "three/webgpu"
 import { TypedFn } from "@/lib/tsl/typed-fn"
 import { typedStruct } from "@/lib/tsl/typed-struct"
 
-interface GetCameraRayParams {
+interface GetCameraRayParams extends Record<string, unknown> {
   cameraPosition: Node
   cameraProjectionMatrixInverse: Node
   cameraWorldMatrix: Node
@@ -56,7 +56,24 @@ export const CameraRay = typedStruct({
   rayDir: 'vec3'
 }, "CameraRay")
 
-export const getCameraRayFn = TypedFn(({ cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, uv }: { cameraPosition: Node, cameraProjectionMatrixInverse: Node, cameraWorldMatrix: Node, uv: Node }) => {
+/**
+ * Calculates the camera ray origin and direction
+ * 
+ * 
+ * @example
+```
+const cameraRay = getCameraRayFn({
+  cameraPosition,
+  cameraProjectionMatrixInverse,
+  cameraWorldMatrix,
+  uv,
+})
+
+const rayDir = cameraRay.get('rayDir')
+const rayOrigin = cameraRay.get('rayOrigin')
+```
+ */
+export const getCameraRayFn = TypedFn(({ cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, uv }: GetCameraRayParams) => {
   const result = getCameraRay({
     cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, uv
   })
