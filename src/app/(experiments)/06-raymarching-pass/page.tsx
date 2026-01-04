@@ -5,7 +5,7 @@
 /**
  * Raymarching as a postprocessign step
  * 
- * Disadvantaje: cannot interact with transparent objects (enable the second mesh to test)
+ * Disadvantage: cannot interact with transparent objects (enable the second mesh to test)
  */
 
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";

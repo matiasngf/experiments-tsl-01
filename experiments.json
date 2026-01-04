@@ -24,7 +24,11 @@
     "name": "06 Raymarching Pass"
   },
   {
-    "url": "/07-volumetric-clouds",
-    "name": "07 Volumetric Clouds"
+    "url": "/07-raymarching-object",
+    "name": "07 Raymarching Object"
+  },
+  {
+    "url": "/99-volumetric-clouds",
+    "name": "99 Volumetric Clouds"
   }
 ]
