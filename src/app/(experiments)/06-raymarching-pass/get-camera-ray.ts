@@ -7,16 +7,14 @@ interface GetCameraRayParams extends Record<string, unknown> {
   cameraPosition: Node
   cameraProjectionMatrixInverse: Node
   cameraWorldMatrix: Node
+  cameraNear: Node
   uv: Node
 }
 
 export const getCameraRay = (params: GetCameraRayParams) => {
-  // === RAY ORIGIN ===
-  // Use our manual uniform instead of cameraPosition
-  const rayOrigin = vec3(params.cameraPosition).toVar();
-  
-    
   // === RAY DIRECTION ===
+  // Calculate ray direction first (from camera position)
+  
   // IMPORTANT: For WebGPU, flip Y BEFORE converting to NDC
   // screenUV goes from (0,0) at bottom-left to (1,1) at top-right
   // WebGPU NDC has Y going up, so we need to flip it
@@ -41,8 +39,13 @@ export const getCameraRay = (params: GetCameraRayParams) => {
     params.cameraWorldMatrix.mul(vec4(viewPoint, 1.0)).xyz
   ).toVar();
   
-  // Ray direction = normalize(worldPoint - rayOrigin)
-  const rayDir = normalize(worldPoint.sub(rayOrigin)).toVar();
+  // Ray direction = normalize(worldPoint - cameraPosition)
+  const rayDir = normalize(worldPoint.sub(params.cameraPosition)).toVar();
+  
+  // === RAY ORIGIN ===
+  // Place ray origin at the camera's near plane
+  // rayOrigin = cameraPosition + rayDir * cameraNear
+  const rayOrigin = vec3(params.cameraPosition).add(rayDir.mul(params.cameraNear)).toVar();
 
   return {
     rayOrigin,
@@ -58,7 +61,7 @@ export const CameraRay = typedStruct({
 
 /**
  * Calculates the camera ray origin and direction
- * 
+ * Ray origin is placed at the camera's near plane
  * 
  * @example
 ```
@@ -66,6 +69,7 @@ const cameraRay = getCameraRayFn({
   cameraPosition,
   cameraProjectionMatrixInverse,
   cameraWorldMatrix,
+  cameraNear,
   uv,
 })
 
@@ -73,9 +77,9 @@ const rayDir = cameraRay.get('rayDir')
 const rayOrigin = cameraRay.get('rayOrigin')
 ```
  */
-export const getCameraRayFn = TypedFn(({ cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, uv }: GetCameraRayParams) => {
+export const getCameraRayFn = TypedFn(({ cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, cameraNear, uv }: GetCameraRayParams) => {
   const result = getCameraRay({
-    cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, uv
+    cameraPosition, cameraProjectionMatrixInverse, cameraWorldMatrix, cameraNear, uv
   })
    
   return CameraRay(result.rayOrigin, result.rayDir)

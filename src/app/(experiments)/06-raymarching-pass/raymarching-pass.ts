@@ -20,6 +20,8 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
     cameraProjectionMatrixInverse: uniform(new Matrix4()),
     cameraWorldMatrix: uniform(new Matrix4()),
     cameraViewMatrix: uniform(new Matrix4()),
+    cameraNear: uniform(0.1),
+    cameraFar: uniform(1000),
   }));
 
   const camera = useThree(s => s.camera)
@@ -32,11 +34,14 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
     raymarchingUniforms.cameraProjectionMatrixInverse.value.copy(camera.projectionMatrixInverse);
     raymarchingUniforms.cameraWorldMatrix.value.copy(camera.matrixWorld);
     raymarchingUniforms.cameraViewMatrix.value.copy(camera.matrixWorldInverse);
+    raymarchingUniforms.cameraNear.value = camera.near;
+    raymarchingUniforms.cameraFar.value = camera.far;
   }, -1);
 
   const raymarchingPassNode = useMemo(() => {
     const maxSteps = uniform(64);
-    const maxDistance = uniform(20.0);
+    // Max distance is the difference between far and near planes
+    const maxDistance = raymarchingUniforms.cameraFar.sub(raymarchingUniforms.cameraNear);
 
     const raymarchingFn = Fn(() => {
       const uv = screenUV;
@@ -48,6 +53,7 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
           cameraPosition: raymarchingUniforms.cameraPosition,
           cameraProjectionMatrixInverse: raymarchingUniforms.cameraProjectionMatrixInverse,
           cameraWorldMatrix: raymarchingUniforms.cameraWorldMatrix,
+          cameraNear: raymarchingUniforms.cameraNear,
           uv,
         }
       )
@@ -67,12 +73,12 @@ export function useRaymarchingPass(sceneColor: TextureNode, sceneDepth: TextureN
         const pos = rayOrigin.add(rayDir.mul(t)).toVar();
         
         // Example: Sphere SDF at world position (0, 1, 0) with radius 0.5
-        const sphereCenter = vec3(0.0, time.sin(), 0.0);
-        const sphereRadius = 0.5;
+        const sphereCenter = vec3(0.0, 0, 0.0);
+        const sphereRadius = 2;
         const dist = length(pos.sub(sphereCenter)).sub(sphereRadius);
         
         // Hit detection
-        If(dist.lessThan(0.01), () => {
+        If(dist.lessThan(0.005), () => {
           
           // Convert world position back to clip space for depth comparison
           const viewPos = raymarchingUniforms.cameraViewMatrix.mul(vec4(pos, 1.0));

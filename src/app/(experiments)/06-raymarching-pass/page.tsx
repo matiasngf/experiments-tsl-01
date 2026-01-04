@@ -2,6 +2,12 @@
  
 "use client";
 
+/**
+ * Raymarching as a postprocessign step
+ * 
+ * Disadvantaje: cannot interact with transparent objects (enable the second mesh to test)
+ */
+
 import { usePostProcessing } from "@/lib/gpu/use-postprocessing";
 import { OrbitControls, PerspectiveCamera } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
@@ -30,7 +36,13 @@ export default function SimpleRaymarchingPage() {
 
 const m = new MeshBasicNodeMaterial({
   color: 'red',
-  wireframe: true
+  wireframe: true,
+})
+
+const m2 = new MeshBasicNodeMaterial({
+  transparent: true,
+  opacity: 0.5,
+  color: 'blue'
 })
 
 function Scene() {
@@ -53,8 +65,11 @@ function Scene() {
       <directionalLight position={[5, 5, 5]} intensity={1} />
       <PerspectiveCamera ref={cameraRef} makeDefault position={[5,5,5]} />
       <mesh material={m}>
-        <boxGeometry args={[2,2,2]} />
-      </mesh>      
+        <sphereGeometry args={[2.015, 64, 32]} />
+      </mesh>
+      <mesh material={m2} visible={false}>
+        <sphereGeometry args={[3]} />
+      </mesh>
     </>
   );
 }
