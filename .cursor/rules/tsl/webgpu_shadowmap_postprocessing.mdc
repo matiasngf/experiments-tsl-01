@@ -1,0 +1,827 @@
+---
+description: A comprehensive guide to accessing and using spotlight shadow map information in custom post-processing effects with WebGPU and TSL.
+alwaysApply: false
+---
+
+## Understanding Shadow Maps
+
+### What is a Shadow Map?
+
+A shadow map is a texture that stores depth information from the light's point of view. Three.js renders the scene from the light's perspective and stores the depth values. During rendering, each pixel's position is compared to the shadow map to determine if it's in shadow.
+
+### Shadow Map Components
+
+Each light with shadows has:
+
+```javascript
+spotLight.castShadow = true;
+
+// Shadow configuration
+spotLight.shadow.mapSize.width = 1024; // Shadow map resolution
+spotLight.shadow.mapSize.height = 1024;
+spotLight.shadow.camera.near = 0.5; // Shadow camera frustum
+spotLight.shadow.camera.far = 500;
+spotLight.shadow.bias = -0.0001; // Depth bias to prevent shadow acne
+
+// After rendering, access via:
+// - spotLight.shadow.map: The shadow render target
+// - spotLight.shadow.map.texture: The shadow map texture
+// - spotLight.shadow.matrix: Shadow projection matrix
+```
+
+### Shadow Map Texture Format
+
+- **Basic/PCF**: Single-channel depth texture (sampler2D or sampler2DShadow)
+- **VSM (Variance Shadow Maps)**: Two-channel RG texture (mean and variance)
+- **Point Lights**: Cube texture (samplerCube)
+- **Spot/Directional Lights**: 2D texture (sampler2D)
+
+---
+
+## Setting Up Shadow Casting
+
+Before accessing shadow maps in post-processing, ensure shadows are properly configured:
+
+```javascript
+import * as THREE from "three/webgpu";
+
+// 1. Enable shadow mapping in renderer
+const renderer = new THREE.WebGPURenderer();
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // or BasicShadowMap, VSMShadowMap
+
+// 2. Configure spotlight with shadows
+const spotLight = new THREE.SpotLight(0xffffff, 100);
+spotLight.position.set(5, 10, 5);
+spotLight.castShadow = true;
+
+// Shadow map configuration
+spotLight.shadow.mapSize.width = 1024;
+spotLight.shadow.mapSize.height = 1024;
+spotLight.shadow.camera.near = 1;
+spotLight.shadow.camera.far = 20;
+spotLight.shadow.bias = -0.001;
+spotLight.shadow.radius = 4; // PCF softness
+
+scene.add(spotLight);
+
+// 3. Enable shadow casting/receiving on objects
+mesh.castShadow = true;
+mesh.receiveShadow = true;
+ground.receiveShadow = true;
+
+// 4. Render at least one frame to generate shadow maps
+renderer.render(scene, camera);
+```
+
+**Important**: Shadow maps are only created after the first render. Access them in post-processing passes that run after the main scene render.
+
+---
+
+## Accessing Shadow Maps in Post-Processing
+
+### Method 1: Using Light References (Recommended)
+
+Access shadow maps through light references in TSL:
+
+```javascript
+import { Fn, uniform, texture } from "three/tsl";
+
+// Store light reference
+const spotLightRef = uniform(spotLight);
+
+// Create post-processing effect
+const shadowEffect = Fn(() => {
+  // Access shadow map texture
+  // Note: Access via .value in Fn context
+  const shadowTexture = texture(spotLightRef.value.shadow.map.texture);
+
+  // Sample the shadow map
+  const shadowDepth = shadowTexture.sample(uv());
+
+  return shadowDepth;
+});
+```
+
+### Method 2: Direct Texture Access
+
+For simpler cases, pass the shadow map texture directly:
+
+```javascript
+import { texture, uniform } from "three/tsl";
+
+// Create uniform after shadow map is generated
+const shadowMapTexture = uniform(spotLight.shadow.map.texture);
+
+// In your effect
+const shadowEffect = Fn(() => {
+  const shadowDepth = texture(shadowMapTexture).sample(uv());
+  return shadowDepth;
+});
+
+// Update reference if light changes
+shadowMapTexture.value = spotLight.shadow.map.texture;
+```
+
+### Method 3: Using onRenderUpdate (Dynamic Updates)
+
+For automatically updating references:
+
+```javascript
+import { texture } from "three/tsl";
+
+const shadowMapNode = texture(spotLight.shadow.map.texture).onRenderUpdate(
+  () => spotLight.shadow.map.texture
+);
+
+// This automatically updates each frame
+const shadowEffect = Fn(() => {
+  const shadowDepth = shadowMapNode.sample(uv());
+  return shadowDepth;
+});
+```
+
+---
+
+## Computing Shadow Coordinates
+
+To properly sample the shadow map, you need to convert world-space positions to shadow map coordinates:
+
+### Using Shadow Matrix
+
+```javascript
+import { Fn, vec3, vec4, positionWorld, uniform } from "three/tsl";
+import { lightShadowMatrix } from "three/tsl";
+
+const shadowEffect = Fn(() => {
+  // Get world position of current fragment
+  const worldPos = positionWorld;
+
+  // Get shadow matrix for the light
+  const shadowMatrix = lightShadowMatrix(spotLight);
+
+  // Transform world position to shadow space
+  const shadowCoord = shadowMatrix.mul(vec4(worldPos, 1.0)).toVar();
+
+  // Perspective divide
+  const shadowUV = shadowCoord.xyz.div(shadowCoord.w).toVar();
+
+  // Convert from [-1, 1] to [0, 1] range
+  shadowUV.xy.assign(shadowUV.xy.mul(0.5).add(0.5));
+
+  // Now shadowUV.xy can be used to sample the shadow map
+  // shadowUV.z is the depth value to compare against
+
+  return shadowUV;
+});
+```
+
+### Complete Shadow Coordinate Calculation
+
+```javascript
+import { Fn, vec3, texture, If, float } from "three/tsl";
+import { lightShadowMatrix } from "three/tsl";
+
+const getShadowCoordinates = Fn(([worldPosition, light]) => {
+  // Transform to shadow space
+  const shadowMatrix = lightShadowMatrix(light);
+  const shadowCoord4 = shadowMatrix.mul(vec4(worldPosition, 1.0));
+
+  // Perspective divide
+  const shadowCoord = shadowCoord4.xyz.div(shadowCoord4.w);
+
+  // Convert to UV space [0, 1]
+  const shadowUV = shadowCoord.xy.mul(0.5).add(0.5);
+  const shadowDepth = shadowCoord.z;
+
+  return vec3(shadowUV, shadowDepth);
+}).setLayout({
+  name: "getShadowCoordinates",
+  type: "vec3",
+  inputs: [
+    { name: "worldPosition", type: "vec3" },
+    { name: "light", type: "SpotLight" },
+  ],
+});
+```
+
+### Sampling with Shadow Comparison
+
+```javascript
+const sampleShadowMap = Fn(([shadowMapTexture, shadowCoord]) => {
+  const uv = shadowCoord.xy;
+  const compareDepth = shadowCoord.z;
+
+  // Sample shadow map depth
+  const shadowMapDepth = texture(shadowMapTexture, uv).r;
+
+  // Compare depths (add bias to prevent shadow acne)
+  const bias = float(-0.0001);
+  const shadow = compareDepth
+    .add(bias)
+    .greaterThan(shadowMapDepth)
+    .select(0.0, 1.0);
+
+  // Check if in shadow map bounds
+  const inBounds = uv.x
+    .greaterThanEqual(0.0)
+    .and(uv.x.lessThanEqual(1.0))
+    .and(uv.y.greaterThanEqual(0.0))
+    .and(uv.y.lessThanEqual(1.0))
+    .and(compareDepth.lessThanEqual(1.0));
+
+  return inBounds.select(shadow, 1.0);
+}).setLayout({
+  name: "sampleShadowMap",
+  type: "float",
+  inputs: [
+    { name: "shadowMapTexture", type: "sampler2D" },
+    { name: "shadowCoord", type: "vec3" },
+  ],
+});
+```
+
+---
+
+## Creating Custom Shadow-Based Effects
+
+### Example 1: Shadow Tinting Effect
+
+Color shadows with a custom tint:
+
+```javascript
+import * as THREE from "three/webgpu";
+import {
+  Fn,
+  vec3,
+  vec4,
+  uniform,
+  texture,
+  pass,
+  positionWorld,
+} from "three/tsl";
+import { lightShadowMatrix } from "three/tsl";
+
+// Setup
+const renderer = new THREE.WebGPURenderer();
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// Create scene pass
+const scenePass = pass(scene, camera);
+const sceneColor = scenePass.getTextureNode("output");
+
+// Shadow tint parameters
+const shadowTintColor = uniform(new THREE.Color(0x4444ff)); // Blue tint
+const shadowTintStrength = uniform(0.3);
+
+// Get world position from depth
+const worldPosFromDepth = scenePass
+  .getLinearDepthNode()
+  .remapClamp(-1, 1, 0, 1);
+
+// Shadow tint effect
+const shadowTintEffect = Fn(() => {
+  const color = vec4(sceneColor);
+
+  // Get shadow coordinates
+  const shadowMatrix = lightShadowMatrix(spotLight);
+  const shadowCoord4 = shadowMatrix.mul(vec4(positionWorld, 1.0));
+  const shadowCoord = shadowCoord4.xyz.div(shadowCoord4.w);
+  const shadowUV = shadowCoord.xy.mul(0.5).add(0.5);
+
+  // Sample shadow map
+  const shadowMapTex = texture(spotLight.shadow.map.texture).onRenderUpdate(
+    () => spotLight.shadow.map.texture
+  );
+  const shadowDepth = shadowMapTex.sample(shadowUV).r;
+
+  // Check if in shadow
+  const isInShadow = shadowCoord.z.greaterThan(shadowDepth.add(0.001));
+
+  // Apply tint to shadowed areas
+  If(isInShadow, () => {
+    const tintedColor = color.rgb.mix(shadowTintColor, shadowTintStrength);
+    color.rgb.assign(tintedColor);
+  });
+
+  return color;
+});
+
+postProcessing.outputNode = shadowTintEffect();
+```
+
+### Example 2: God Rays from Shadows
+
+Create volumetric light rays visible in shadowed areas:
+
+```javascript
+import { Fn, vec2, vec3, vec4, uniform, texture, float, Loop } from "three/tsl";
+import { screenUV } from "three/tsl";
+
+const godRaysEffect = Fn(() => {
+  // Get light position in screen space (project light pos to screen)
+  const lightPosWorld = vec3(spotLight.position);
+  // ... project to screen space (simplified here)
+  const lightScreenPos = vec2(0.5, 0.7); // Replace with actual projection
+
+  // Ray marching parameters
+  const numSamples = 50;
+  const density = uniform(0.5);
+  const weight = uniform(0.3);
+  const decay = uniform(0.95);
+
+  const uv = screenUV;
+  const deltaTextureCoord = uv.sub(lightScreenPos).div(float(numSamples));
+
+  let illuminationDecay = float(1.0).toVar();
+  let godRay = float(0.0).toVar();
+  let sampleUV = uv.toVar();
+
+  // Ray march towards light
+  Loop(numSamples, () => {
+    sampleUV.subAssign(deltaTextureCoord);
+
+    // Sample shadow map at this position
+    // ... (shadow coordinate calculation)
+
+    // Accumulate light
+    const sample = float(1.0); // Replace with actual shadow sample
+    godRay.addAssign(sample.mul(illuminationDecay).mul(weight));
+    illuminationDecay.mulAssign(decay);
+  });
+
+  const sceneColor = vec4(sceneColor);
+  return sceneColor.add(vec4(godRay.mul(density)));
+});
+
+postProcessing.outputNode = godRaysEffect();
+```
+
+### Example 3: Shadow Enhancement
+
+Enhance shadow contrast and add detail:
+
+```javascript
+const shadowEnhancement = Fn(() => {
+  const color = vec4(sceneColor);
+
+  // Get shadow value (0 = shadow, 1 = lit)
+  // ... (shadow coordinate calculation and sampling)
+  const shadowValue = float(1.0); // Replace with actual shadow sample
+
+  const enhancementStrength = uniform(0.5);
+  const shadowDarkness = uniform(0.3);
+
+  // Enhance shadow contrast
+  const enhancedShadow = shadowValue.pow(2.0); // Increase contrast
+
+  // Darken shadows
+  const darkening = enhancedShadow.oneMinus().mul(shadowDarkness);
+  color.rgb.mulAssign(float(1.0).sub(darkening));
+
+  return color;
+});
+```
+
+---
+
+## Complete Working Examples
+
+### Full Post-Processing Effect with Shadow Map Access
+
+```javascript
+import * as THREE from "three/webgpu";
+import {
+  Fn,
+  vec3,
+  vec4,
+  uniform,
+  texture,
+  pass,
+  positionWorld,
+  screenUV,
+  If,
+} from "three/tsl";
+import { lightShadowMatrix } from "three/tsl";
+
+// ===== SCENE SETUP =====
+
+const renderer = new THREE.WebGPURenderer();
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(
+  75,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000
+);
+camera.position.set(5, 5, 5);
+camera.lookAt(0, 0, 0);
+
+// ===== LIGHTING =====
+
+const spotLight = new THREE.SpotLight(0xffffff, 100);
+spotLight.position.set(5, 10, 0);
+spotLight.angle = Math.PI / 6;
+spotLight.penumbra = 0.2;
+spotLight.decay = 2;
+spotLight.castShadow = true;
+spotLight.shadow.mapSize.width = 1024;
+spotLight.shadow.mapSize.height = 1024;
+spotLight.shadow.camera.near = 1;
+spotLight.shadow.camera.far = 20;
+spotLight.shadow.bias = -0.001;
+scene.add(spotLight);
+
+const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+scene.add(ambientLight);
+
+// ===== GEOMETRY =====
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 20),
+  new THREE.MeshStandardMaterial({ color: 0x808080 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+const cube = new THREE.Mesh(
+  new THREE.BoxGeometry(2, 2, 2),
+  new THREE.MeshStandardMaterial({ color: 0xff6b6b })
+);
+cube.position.y = 1;
+cube.castShadow = true;
+cube.receiveShadow = true;
+scene.add(cube);
+
+// ===== POST-PROCESSING =====
+
+const postProcessing = new THREE.PostProcessing(renderer);
+
+// Create scene pass
+const scenePass = pass(scene, camera);
+const scenePassColor = scenePass.getTextureNode("output");
+const scenePassDepth = scenePass.getTextureNode("depth");
+
+// Shadow-based effect parameters
+const effectColor = uniform(new THREE.Color(0x00ff88));
+const effectStrength = uniform(0.5);
+
+// Create shadow texture reference that updates each frame
+const shadowMapTexture = texture(spotLight.shadow.map.texture).onRenderUpdate(
+  () => spotLight.shadow.map.texture
+);
+
+// Main effect
+const shadowBasedEffect = Fn(() => {
+  // Get scene color
+  const color = vec4(scenePassColor);
+  const uv = screenUV;
+
+  // Reconstruct world position from depth
+  // (Simplified - in real implementation use depth reconstruction)
+  const depth = texture(scenePassDepth, uv).r;
+
+  // For this example, we'll use a simpler approach:
+  // Sample shadow map at screen UV (not physically accurate but demonstrates access)
+  const shadowSample = shadowMapTexture.sample(uv);
+  const shadowValue = shadowSample.r;
+
+  // Apply effect based on shadow value
+  // Lower values = darker areas in shadow map
+  const effectMask = shadowValue.oneMinus().mul(effectStrength);
+  const tintedColor = color.rgb.mix(effectColor, effectMask);
+
+  color.rgb.assign(tintedColor);
+
+  return color;
+});
+
+postProcessing.outputNode = shadowBasedEffect();
+
+// ===== ANIMATION LOOP =====
+
+function animate() {
+  // Rotate cube
+  cube.rotation.y += 0.01;
+
+  // Animate light
+  const time = performance.now() * 0.001;
+  spotLight.position.x = Math.sin(time) * 5;
+  spotLight.position.z = Math.cos(time) * 5;
+  spotLight.lookAt(0, 0, 0);
+
+  // Render with post-processing
+  postProcessing.render();
+}
+
+renderer.setAnimationLoop(animate);
+```
+
+### Advanced: Physically-Based Shadow Sampling
+
+For accurate world-space shadow sampling in post-processing:
+
+```javascript
+import { Fn, vec3, vec4, mat4, uniform, texture } from "three/tsl";
+
+// Depth reconstruction helper
+const reconstructWorldPosition = Fn(([uv, depth, camera]) => {
+  // Get clip space position
+  const clipSpacePos = vec4(
+    uv.x.mul(2.0).sub(1.0),
+    uv.y.mul(2.0).sub(1.0),
+    depth.mul(2.0).sub(1.0),
+    1.0
+  );
+
+  // Transform to world space
+  const invViewProj = mat4(camera.projectionMatrixInverse).mul(
+    camera.matrixWorld
+  );
+  const worldPos = invViewProj.mul(clipSpacePos);
+
+  return worldPos.xyz.div(worldPos.w);
+}).setLayout({
+  name: "reconstructWorldPosition",
+  type: "vec3",
+  inputs: [
+    { name: "uv", type: "vec2" },
+    { name: "depth", type: "float" },
+    { name: "camera", type: "Camera" },
+  ],
+});
+
+const accurateShadowEffect = Fn(() => {
+  const uv = screenUV;
+  const depth = texture(scenePassDepth, uv).r;
+
+  // Reconstruct world position
+  const worldPos = reconstructWorldPosition(uv, depth, camera);
+
+  // Get shadow coordinates
+  const shadowMatrix = lightShadowMatrix(spotLight);
+  const shadowCoord4 = shadowMatrix.mul(vec4(worldPos, 1.0));
+  const shadowCoord = shadowCoord4.xyz.div(shadowCoord4.w);
+
+  // Convert to shadow map UV
+  const shadowUV = shadowCoord.xy.mul(0.5).add(0.5);
+  const fragmentDepth = shadowCoord.z;
+
+  // Sample shadow map
+  const shadowDepth = shadowMapTexture.sample(shadowUV).r;
+
+  // Shadow test with bias
+  const bias = uniform(0.001);
+  const isInShadow = fragmentDepth.sub(bias).greaterThan(shadowDepth);
+
+  // Check bounds
+  const inBounds = shadowUV.x
+    .greaterThanEqual(0.0)
+    .and(shadowUV.x.lessThanEqual(1.0))
+    .and(shadowUV.y.greaterThanEqual(0.0))
+    .and(shadowUV.y.lessThanEqual(1.0));
+
+  const shadowFactor = inBounds.and(isInShadow).select(0.0, 1.0);
+
+  // Apply effect
+  const color = vec4(scenePassColor);
+  const effectAmount = shadowFactor.oneMinus().mul(effectStrength);
+  color.rgb.mulAssign(vec3(1.0).sub(effectAmount));
+
+  return color;
+});
+```
+
+---
+
+## Common Patterns
+
+### Pattern 1: Multiple Light Shadows
+
+Combine shadow information from multiple lights:
+
+```javascript
+const multiLightShadowEffect = Fn(() => {
+  const color = vec4(scenePassColor);
+
+  // Accumulate shadow from multiple lights
+  let combinedShadow = float(0.0).toVar();
+
+  // Light 1
+  // ... calculate shadow1
+
+  // Light 2
+  // ... calculate shadow2
+
+  combinedShadow.assign(shadow1.mul(0.5).add(shadow2.mul(0.5)));
+
+  // Apply combined effect
+  color.rgb.mulAssign(combinedShadow);
+
+  return color;
+});
+```
+
+### Pattern 2: Shadow Softening in Post-Process
+
+Apply additional blur to shadow edges:
+
+```javascript
+import { gaussianBlur } from "three/addons/tsl/display/GaussianBlurNode.js";
+
+// Extract shadow mask
+const shadowMaskPass = Fn(() => {
+  // ... calculate shadow value
+  return vec4(shadowValue); // 0 or 1
+});
+
+// Blur the shadow mask
+const blurredShadow = gaussianBlur(shadowMaskPass(), 2.0);
+
+// Apply to scene
+const softShadowEffect = Fn(() => {
+  const color = vec4(scenePassColor);
+  const softShadow = vec4(blurredShadow).r;
+
+  color.rgb.mulAssign(softShadow.mix(0.5, 1.0));
+  return color;
+});
+```
+
+### Pattern 3: Shadow-Aware Color Grading
+
+Apply different color grading to lit and shadowed areas:
+
+```javascript
+const shadowAwareGrading = Fn(() => {
+  const color = vec4(scenePassColor);
+
+  // Get shadow value
+  // ... (shadow calculation)
+  const shadowValue = float(1.0); // Replace with actual
+
+  // Different color grading for lit vs shadow
+  const litColor = color.rgb.pow(vec3(0.8)); // Slight gamma
+  const shadowColor = color.rgb.mul(vec3(0.7, 0.8, 1.0)); // Cool shadows
+
+  const gradedColor = shadowValue.mix(shadowColor, litColor);
+
+  return vec4(gradedColor, color.a);
+});
+```
+
+---
+
+## Troubleshooting
+
+### Issue: Shadow Map is Undefined or Null
+
+**Problem**: `spotLight.shadow.map` is `null` or `undefined`.
+
+**Solution**: Shadow maps are created on the first render. Ensure you've rendered at least once before accessing:
+
+```javascript
+// Render once to generate shadow maps
+renderer.render(scene, camera);
+
+// Now setup post-processing
+const postProcessing = new THREE.PostProcessing(renderer);
+// ... rest of setup
+```
+
+Or use `onRenderUpdate()` to safely access:
+
+```javascript
+const shadowMapTexture = texture(new THREE.Texture()) // Placeholder
+  .onRenderUpdate(() => {
+    if (spotLight.shadow.map) {
+      return spotLight.shadow.map.texture;
+    }
+    return new THREE.Texture(); // Return placeholder
+  });
+```
+
+### Issue: Shadow Coordinates Don't Match Scene
+
+**Problem**: Shadow sampling doesn't align with actual shadows in the scene.
+
+**Solution**: Ensure you're properly reconstructing world position from depth:
+
+```javascript
+// Make sure to use correct matrices
+const viewMatrix = uniform(camera.matrixWorldInverse);
+const projectionMatrix = uniform(camera.projectionMatrix);
+
+// Proper depth reconstruction
+const ndc = vec3(uv.mul(2.0).sub(1.0), depth.mul(2.0).sub(1.0));
+const viewPos = projectionMatrix.inverse().mul(vec4(ndc, 1.0));
+const worldPos = viewMatrix
+  .inverse()
+  .mul(vec4(viewPos.xyz.div(viewPos.w), 1.0));
+```
+
+### Issue: Shadow Acne or Peter Panning
+
+**Problem**: Artifacts in shadow sampling.
+
+**Solution**: Adjust shadow bias:
+
+```javascript
+// In shadow comparison
+const bias = uniform(-0.001); // Adjust this value
+const isInShadow = fragmentDepth.add(bias).greaterThan(shadowDepth);
+
+// Or use dynamic bias based on slope
+const normalBias = normal.dot(lightDirection).mul(0.01);
+```
+
+### Issue: Performance Problems
+
+**Problem**: Post-processing with shadow sampling is slow.
+
+**Solution**: Optimize shadow map resolution and sampling:
+
+```javascript
+// Lower shadow map resolution if not needed
+spotLight.shadow.mapSize.width = 512; // Instead of 2048
+spotLight.shadow.mapSize.height = 512;
+
+// Reduce post-processing resolution
+scenePass.setResolutionScale(0.5); // Render at half resolution
+
+// Use simpler shadow comparison (avoid PCF in post-process)
+// Sample once instead of multiple times
+```
+
+### Issue: VSM Shadow Maps Look Different
+
+**Problem**: VSM shadow maps have different data format.
+
+**Solution**: Handle VSM differently:
+
+```javascript
+const sampleVSMShadow = Fn(([shadowTexture, shadowCoord]) => {
+  const uv = shadowCoord.xy;
+  const depth = shadowCoord.z;
+
+  // VSM stores mean and variance in RG channels
+  const moments = texture(shadowTexture, uv).rg;
+  const mean = moments.x;
+  const variance = moments.y;
+
+  // Chebyshev's inequality
+  const d = depth.sub(mean);
+  const p_max = variance.div(variance.add(d.mul(d)));
+
+  return depth.lessThanEqual(mean).select(1.0, p_max);
+});
+```
+
+---
+
+## Best Practices
+
+1. **Always check shadow map existence**: Use `onRenderUpdate()` or render before accessing
+2. **Use appropriate shadow map resolution**: Balance quality and performance
+3. **Add proper bias**: Prevent shadow acne with `shadowBias` and comparison bias
+4. **Cache shadow coordinates**: Calculate once and reuse in effect
+5. **Consider shadow type**: PCF, VSM, and Basic shadow maps have different formats
+6. **Use uniforms for parameters**: Allow runtime adjustment without shader recompilation
+7. **Profile performance**: Shadow map sampling in post-process can be expensive
+8. **Test edge cases**: Check shadow map bounds and handle out-of-bounds UVs
+
+---
+
+## See Also
+
+- **Volumetric Lighting Guide**: `guides/webgpu-volumetric-lighting.mdc` - Uses shadow maps for volumetric effects
+- **TSL Nodes Guide**: `guides/tsl-nodes-guide.md` - Understanding the node system
+- **Post-Processing Guide**: `recipes/tsl_postprocessing.md` - General post-processing patterns
+- **Examples**:
+  - `examples/webgpu_volume_lighting.html` - Shadow-aware volumetric lighting
+  - `examples/webgpu_shadowmap_*.html` - Various shadow map examples
+- **Source Code**:
+  - `src/nodes/lighting/ShadowNode.js` - Shadow system implementation
+  - `src/nodes/accessors/Lights.js` - Light accessor functions including `lightShadowMatrix()`
+  - `src/nodes/lighting/SpotLightNode.js` - Spotlight implementation
+
+---
+
+## Summary
+
+Key takeaways for using shadow maps in post-processing:
+
+1. **Enable shadows**: `renderer.shadowMap.enabled = true` and `light.castShadow = true`
+2. **Access shadow map**: Via `light.shadow.map.texture` with `.onRenderUpdate()`
+3. **Calculate coordinates**: Use `lightShadowMatrix()` to transform world position
+4. **Sample correctly**: Handle perspective divide, UV conversion, and depth comparison
+5. **Handle edge cases**: Check bounds, add bias, handle null shadow maps
+6. **Optimize**: Use appropriate resolutions and minimize sampling
+
+Shadow map access in post-processing enables creative effects that combine lighting information with screen-space processing, opening up possibilities for unique visual styles and realistic lighting effects.

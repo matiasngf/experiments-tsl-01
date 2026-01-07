@@ -32,6 +32,10 @@
     "name": "08 Instanced Uniform"
   },
   {
+    "url": "/09-volumetric-lighting",
+    "name": "09 Volumetric Lighting"
+  },
+  {
     "url": "/99-volumetric-clouds",
     "name": "99 Volumetric Clouds"
   }
