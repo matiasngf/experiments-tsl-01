@@ -28,6 +28,10 @@
     "name": "07 Raymarching Object"
   },
   {
+    "url": "/08-instanced-uniform",
+    "name": "08 Instanced Uniform"
+  },
+  {
     "url": "/99-volumetric-clouds",
     "name": "99 Volumetric Clouds"
   }
