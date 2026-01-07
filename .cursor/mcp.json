@@ -7,6 +7,10 @@
     "mcp-three": {
       "command": "npx",
       "args": ["mcp-three@latest"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
     }
   }
 }
